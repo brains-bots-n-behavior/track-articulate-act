@@ -1,19 +1,22 @@
 # Articulate4D Pipeline — Command Guide
 
 Per-stage isolated tools, separate conda envs, one shared scene folder on disk.
-Stages run in order: **(05) → 10 → 20 → 30 → 00 → 40 → 50 → 52 → 60 → 51 (replay)**.
-Each stage reads and writes only files under `data/<scene_id>/`. Stage 05 (the
-prompt picker) is an optional pre-step that feeds stage 10. Stages 50/52/60
-are independent of each other and can be reordered or skipped.
+Stages run in order: **00 → (05) → 10 → 20 → 30 → 32 → 40 → 50 → 52 → 60 → 51 (replay)**.
+Each stage reads and writes only files under `data/<scene_id>/`. Stage 00 (DA3
+depth + cameras) needs only the raw frames, so it can run first — or any time
+before stage 40, which consumes it. Stage 05 (the prompt picker) is an optional
+pre-step that feeds stage 10. Stage 32 (Any6D 6D pose) needs 30 + 00; stages
+32/50/52/60 are independent of each other and can be reordered or skipped.
 
 **Geometry + tracking (replaces Any4D).** Depth, per-frame cameras, and the
 scene **world frame** now come from **stage 00** (`00_da3_depth_cameras.py`,
 Depth-Anything-3); point tracking / scene flow comes from **stage 40**
 (`40_trackcraft_flow.py`, TrackCraft3R). Together they produce exactly the
-files the old Any4D stage 40 did, so everything downstream is unchanged. Run
-**00 before 40** (40 reads 00's depth + cameras). The output folder keeps the
-name **`any4d/`** for compatibility with the downstream stages — it is just the
-shared geometry/tracking bundle, no longer produced by Any4D.
+files the old Any4D stage 40 did, so everything downstream is unchanged. Stage
+00 depends only on `frames/` (run it whenever), and **40 must run after 00**
+(it reads 00's depth + cameras). The output folder keeps the name **`any4d/`**
+for compatibility with the downstream stages — it is just the shared
+geometry/tracking bundle, no longer produced by Any4D.
 
 ```
 data/<scene>/
@@ -615,9 +618,10 @@ Adapts `Any6D/run_pose.py` (the SAM2/InstantMesh-free driver) to the scene
 layout. For each label, Any6D registers the **stage-30 mesh** to the masked
 metric pointcloud at that label's keyframe and returns the object→camera 6D
 pose, while also rescaling the mesh to metric size via its oriented-bounding-box
-ratio fit. **Not part of the core order** — it's an object-level alternative to
-the stage-52 silhouette alignment, and needs stages 30 + 00 (it reuses the
-stage-00 depth + intrinsics under `any4d/moge/`; stage 52 it does not need).
+ratio fit. It needs stages **30 + 00** (it reuses the stage-00 depth +
+intrinsics under `any4d/moge/`) and is independent of 40/50 — run it any time
+after 30 and 00. It gives the object-level pose (complementary to stage 52's
+silhouette alignment, which fits the mesh for stage-51 rendering).
 
 The stage-00 depth is treated as **metric** (meters), so there is no
 `depth_scale` divisor — the `.npy` is fed straight in. Pixels are restricted

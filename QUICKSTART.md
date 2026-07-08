@@ -15,11 +15,13 @@ HAWOR_REPO=/home/jeremy/research/Articulate4D/HaWoR   # stage 60
 ANY6D_REPO=/home/jeremy/research/Articulate4D/Any6D   # only for stage 32
 ```
 
-Stage order: **(05) → 10 → 20 → 30 → 00 → 40 → 50 → 52 → 60 → 51 (replay)**.
-(05 is the optional prompt picker that feeds stage 10; 50 / 52 / 60 are
-independent — skip any if you don't need it.) Stage **00** (Depth-Anything-3)
-provides depth + cameras and stage **40** (TrackCraft3R) provides point
-tracking — together they replace Any4D; run **00 before 40**.
+Stage order: **00 → (05) → 10 → 20 → 30 → 32 → 40 → 50 → 52 → 60 → 51 (replay)**.
+(05 is the optional prompt picker that feeds stage 10; 32 / 50 / 52 / 60 are
+independent — 32 needs 30 + 00.) Stage **00** (Depth-Anything-3)
+needs only `frames/`, so it can run first; stage **40** (TrackCraft3R) provides
+point tracking — together they replace Any4D, and **40 must run after 00**.
+(The walkthrough below runs 00 alongside 40 for readability, but you can run it
+up front.)
 
 ## 0. Normalize frame filenames (one-time per scene)
 
@@ -211,15 +213,15 @@ jq '{kf: .keyframe,
     "$SCENE/aligned/<label>/align.json"
 ```
 
-### (Optional) Stage 32 — Any6D 6D object pose
+### Stage 32 — Any6D 6D object pose
 
-An object-level alternative to the stage-52 silhouette alignment: Any6D
-registers each stage-30 mesh to the stage-00 **metric** depth
-(`any4d/moge/depth`) at the label's keyframe and returns a 6D object→camera
-pose (also baked to the shared world frame when `any4d/cameras.npz` exists).
-Needs stages 30 + 00; runs in the `any6d` GPU env. Restrict to rigid objects —
-skip `hand`/non-object parts. (Note: DA3 depth is not guaranteed metric — see
-the stage-00 scale caveat if the poses look off.)
+Per-object 6D pose: Any6D registers each stage-30 mesh to the stage-00
+**metric** depth (`any4d/moge/depth`) at the label's keyframe and returns a 6D
+object→camera pose (also baked to the shared world frame when
+`any4d/cameras.npz` exists). Needs stages **30 + 00** (independent of 40/50, so
+run it any time after those); runs in the `any6d` GPU env. Restrict to rigid
+objects — skip `hand`/non-object parts. (Note: DA3 depth is not guaranteed
+metric — see the stage-00 scale caveat if the poses look off.)
 
 **Headless-safe:** opens no GUI and renders nothing to a display (Any6D's
 refiner uses an offscreen CUDA rasterizer). All results are plain data files
