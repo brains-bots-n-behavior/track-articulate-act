@@ -9,19 +9,17 @@ Set these once and the rest works as-is.
 SCENE=data/kitchen_pour_01
 SAM3D_REPO=/home/jeremy/research/Articulate4D/sam-3d-objects
 DA3_ROOT=/home/jeremy/research/Articulate4D/depth-anything-3      # stage 00
+ANY6D_REPO=/home/jeremy/research/Articulate4D/Any6D               # stage 32
 TRACKCRAFT_REPO=/home/jeremy/research/Articulate4D/TrackCraft3r   # stage 40
 TRACKCRAFT_CKPT=/path/to/trackcraft3r/model.safetensors          # stage 40
-HAWOR_REPO=/home/jeremy/research/Articulate4D/HaWoR   # stage 60
-ANY6D_REPO=/home/jeremy/research/Articulate4D/Any6D   # only for stage 32
+HAWOR_REPO=/home/jeremy/research/Articulate4D/HaWoR               # stage 60
 ```
 
 Stage order: **00 → (05) → 10 → 20 → 30 → 32 → 40 → 50 → 52 → 60 → 51 (replay)**.
-(05 is the optional prompt picker that feeds stage 10; 32 / 50 / 52 / 60 are
-independent — 32 needs 30 + 00.) Stage **00** (Depth-Anything-3)
-needs only `frames/`, so it can run first; stage **40** (TrackCraft3R) provides
-point tracking — together they replace Any4D, and **40 must run after 00**.
-(The walkthrough below runs 00 alongside 40 for readability, but you can run it
-up front.)
+Stage **00** (Depth-Anything-3) needs only `frames/`, so it runs first. 05 is
+the optional prompt picker that feeds stage 10; 32 / 50 / 52 / 60 are
+independent (32 needs 30 + 00). Stage **40** (TrackCraft3R) provides point
+tracking — together 00 + 40 replace Any4D, and **40 must run after 00**.
 
 ## 0. Normalize frame filenames (one-time per scene)
 
@@ -30,7 +28,26 @@ python scripts/pad_frame_names.py -n  "$SCENE/frames"   # preview
 python scripts/pad_frame_names.py     "$SCENE/frames"   # apply
 ```
 
-## 1. Write your prompts
+## 1. Stage 00 — Depth-Anything-3 depth + cameras/world frame
+
+Runs on the raw frames only, so it goes first. Writes the geometry bundle to
+`$SCENE/any4d/` (depth, `cameras.npz`, intrinsics, `pointmap_ref.npy`).
+
+```bash
+conda activate da3
+
+python scripts/00_da3_depth_cameras.py \
+    --scene-dir "$SCENE" \
+    --da3-root  "$DA3_ROOT" \
+    --overwrite
+```
+
+`--ref-frame` defaults to 0 (it only seeds the dense reference pointmap); stage
+40 later recomputes the reference at its tracking window's start, so you don't
+need to choose one here. Variants: `--start-idx 20 --end-idx 80` for a subrange,
+`--model-name da3-large` for a smaller model.
+
+## 2. Write your prompts
 
 Write it into the scene folder — `$SCENE/prompts.json` is the canonical
 location (where stage 05's picker saves and what stage 10 reads):
@@ -65,17 +82,17 @@ python scripts/05_pick_prompts.py --scene-dir "$SCENE"   # writes $SCENE/prompts
 
 Then point stage 10 at that file (`--prompts-json "$SCENE/prompts.json"`).
 
-## 2. Stage 10 — segment
+## 3. Stage 10 — segment
 
 ```bash
-conda activate sam3
+conda deactivate && conda activate sam3
 python scripts/10_sam3_segment.py \
     --scene-dir "$SCENE" \
     --prompts-json "$SCENE/prompts.json" \
     --overwrite
 ```
 
-## 3. Stage 20 — pick keyframes
+## 4. Stage 20 — pick keyframes
 
 ```bash
 python scripts/20_pick_keyframes.py --scene-dir "$SCENE"
@@ -87,7 +104,7 @@ Tune for clip length if needed:
 
 To override a pick: `--manual mug=42 spoon=87`.
 
-## 4. Stage 30 — reconstruct meshes
+## 5. Stage 30 — reconstruct meshes
 
 ```bash
 conda deactivate && conda activate sam3d-objects
@@ -108,120 +125,15 @@ Variants:
   `--bg-mode white --bg-dilate 3 --bg-feather 2` tunes the fill, `--save-input`
   dumps the masked RGBA the model sees.
 
-## 5a. Stage 00 — Depth-Anything-3 depth + cameras/world frame
-
-Pick a reference frame (usually one of the stage-20 keyframes for the object
-you care about) — it seeds the dense reference pointmap:
-
-```bash
-jq '. | to_entries | map({label: .key, keyframe: .value.keyframe})' \
-    "$SCENE/masks/tracking.json"
-REF_FRAME=42   # ← replace
-```
-
-```bash
-conda deactivate && conda activate da3
-
-python scripts/00_da3_depth_cameras.py \
-    --scene-dir "$SCENE" \
-    --da3-root  "$DA3_ROOT" \
-    --ref-frame "$REF_FRAME" \
-    --overwrite
-```
-
-Writes the geometry bundle to `$SCENE/any4d/` (depth, `cameras.npz`, intrinsics,
-`pointmap_ref.npy`). Variants: `--start-idx 20 --end-idx 80` for a subrange,
-`--model-name da3-large` for a smaller model.
-
-## 5b. Stage 40 — TrackCraft3R point tracking
-
-Runs TrackCraft3R on a fixed window starting at `--start-idx` and converts the
-tracks into per-label scene flow (world frame). The window's first frame is the
-reference, so set `--start-idx` to your `REF_FRAME`:
-
-```bash
-conda deactivate && conda activate trackcraft
-
-python scripts/40_trackcraft_flow.py \
-    --scene-dir       "$SCENE" \
-    --trackcraft-repo "$TRACKCRAFT_REPO" \
-    --checkpoint      "$TRACKCRAFT_CKPT" \
-    --start-idx "$REF_FRAME" --num-frames 12 --frame-stride 5 \
-    --overwrite
-```
-
-Variants:
-- Wider temporal span: `--frame-stride 10` (window = num-frames × frame-stride)
-- Single label:        append `--labels mug`
-
-Quick check that the bundle is reusable (RGB + depth + ref pointmap + flow):
-
-```bash
-python scripts/41_replay_in_rerun.py --scene-dir "$SCENE"
-```
-
-## 6. Stage 50 — estimate joint type + axis
-
-```bash
-python scripts/50_estimate_joint.py --scene-dir "$SCENE"
-```
-
-Procrustes per frame + an LM step on the frames temporally closest to
-`ref_frame`. Variants:
-- Strictly previous frames, wider window:
-  `--refine-side prev --refine-window 12`
-- Tighten the coarse-fit θ band:
-  `--theta-min 5 --theta-max 60 --frame-rms-quantile 0.5`
-- Skip refinement for non-rigid labels (e.g. a hand):
-  `--labels hand --no-refine`
-
-Sanity-check the recovered joints:
-
-```bash
-jq '. | to_entries | map({label: .key,
-                          type: .value.type,
-                          axis: .value.axis_direction,
-                          point: .value.axis_point})' \
-    "$SCENE/any4d/joints.json"
-```
-
-## 7. Stage 52 — align sam3d meshes to image + mask
-
-```bash
-python scripts/52_align_meshes.py --scene-dir "$SCENE" --overwrite
-```
-
-Default pipeline per label: apply `pose.json` (with PyTorch3D→RDF flip) →
-silhouette IoU + DT-chamfer + ICP refinement → bake camera-to-world for the
-keyframe. Saves an aligned GLB per label in the shared world frame.
-
-Variants:
-- Higher rendering fidelity (slower): `--render-factor 2 --max-iters 600`
-- Enable mesh_alignment.py-style rescale for sam3d-body-like meshes: `--coarse`
-- Single label:                       `--labels laptop_up`
-
-For rigid objects, **stage 32 (Any6D)** is an object-level alternative that
-registers the mesh directly to the stage-00 depth — use it when the silhouette
-optimizer struggles.
-
-Sanity-check:
-
-```bash
-jq '{kf: .keyframe,
-     iou_pose: .step_A_pose_json.iou_full,
-     iou_refined: .step_C_refine.iou_full_after}' \
-    "$SCENE/aligned/<label>/align.json"
-```
-
-### Stage 32 — Any6D 6D object pose
+## 6. Stage 32 — Any6D 6D object pose
 
 Per-object 6D pose: Any6D registers each stage-30 mesh to the stage-00
 **metric** depth (`any4d/moge/depth`) at the label's keyframe and returns a 6D
 object→camera pose (also baked to the shared world frame when
-`any4d/cameras.npz` exists). Needs stages **30 + 00** (independent of 40/50, so
-run it any time after those); runs in the `any6d` GPU env. Restrict to rigid
-objects — skip `hand`/non-object parts. (Note: DA3 depth is not guaranteed
-metric — see the stage-00 scale caveat if the poses look off.)
+`any4d/cameras.npz` exists). Needs stages **30 + 00** (both done by now) and is
+independent of 40/50. Runs in the `any6d` GPU env. Restrict to rigid objects —
+skip `hand`/non-object parts. (Note: DA3 depth is not guaranteed metric — see
+the stage-00 scale caveat if the poses look off.)
 
 **Headless-safe:** opens no GUI and renders nothing to a display (Any6D's
 refiner uses an offscreen CUDA rasterizer). All results are plain data files
@@ -269,7 +181,94 @@ python scripts/33_visualize_any6d.py --scene-dir "$SCENE"
 - Headless server (no display): `--save-rrd "$SCENE/any6d/preview.rrd"`, then
   `scp` it and open with `rerun preview.rrd` on a workstation.
 
-## 8. Stage 60 — HaWoR hand tracking
+## 7. Stage 40 — TrackCraft3R point tracking
+
+Pick a reference frame (usually one of the stage-20 keyframes for the object
+you care about) — it becomes the tracking window's first frame:
+
+```bash
+jq '. | to_entries | map({label: .key, keyframe: .value.keyframe})' \
+    "$SCENE/masks/tracking.json"
+REF_FRAME=42   # ← replace
+```
+
+Runs TrackCraft3R on a fixed window starting at `--start-idx` and converts the
+tracks into per-label scene flow (world frame):
+
+```bash
+conda deactivate && conda activate trackcraft
+
+python scripts/40_trackcraft_flow.py \
+    --scene-dir       "$SCENE" \
+    --trackcraft-repo "$TRACKCRAFT_REPO" \
+    --checkpoint      "$TRACKCRAFT_CKPT" \
+    --start-idx "$REF_FRAME" --num-frames 12 --frame-stride 5 \
+    --overwrite
+```
+
+Variants:
+- Wider temporal span: `--frame-stride 10` (window = num-frames × frame-stride)
+- Single label:        append `--labels mug`
+
+Quick check that the bundle is reusable (RGB + depth + ref pointmap + flow):
+
+```bash
+python scripts/41_replay_in_rerun.py --scene-dir "$SCENE"
+```
+
+## 8. Stage 50 — estimate joint type + axis
+
+```bash
+python scripts/50_estimate_joint.py --scene-dir "$SCENE"
+```
+
+Procrustes per frame + an LM step on the frames temporally closest to
+`ref_frame`. Variants:
+- Strictly previous frames, wider window:
+  `--refine-side prev --refine-window 12`
+- Tighten the coarse-fit θ band:
+  `--theta-min 5 --theta-max 60 --frame-rms-quantile 0.5`
+- Skip refinement for non-rigid labels (e.g. a hand):
+  `--labels hand --no-refine`
+
+Sanity-check the recovered joints:
+
+```bash
+jq '. | to_entries | map({label: .key,
+                          type: .value.type,
+                          axis: .value.axis_direction,
+                          point: .value.axis_point})' \
+    "$SCENE/any4d/joints.json"
+```
+
+## 9. Stage 52 — align sam3d meshes to image + mask
+
+```bash
+python scripts/52_align_meshes.py --scene-dir "$SCENE" --overwrite
+```
+
+Default pipeline per label: apply `pose.json` (with PyTorch3D→RDF flip) →
+silhouette IoU + DT-chamfer + ICP refinement → bake camera-to-world for the
+keyframe. Saves an aligned GLB per label in the shared world frame.
+
+Variants:
+- Higher rendering fidelity (slower): `--render-factor 2 --max-iters 600`
+- Enable mesh_alignment.py-style rescale for sam3d-body-like meshes: `--coarse`
+- Single label:                       `--labels laptop_up`
+
+For rigid objects, the **stage 32 (Any6D)** pose from step 6 is an object-level
+alternative — use it when the silhouette optimizer struggles.
+
+Sanity-check:
+
+```bash
+jq '{kf: .keyframe,
+     iou_pose: .step_A_pose_json.iou_full,
+     iou_refined: .step_C_refine.iou_full_after}' \
+    "$SCENE/aligned/<label>/align.json"
+```
+
+## 10. Stage 60 — HaWoR hand tracking
 
 Video-temporal two-hand tracker (detect/track → motion → DROID-SLAM → in-fill).
 Writes per-frame MANO mesh + 3D keypoints to `hawor/per_frame/<frame>.npz`; if
@@ -299,7 +298,7 @@ jq '{n: .total_hands,
 ls "$SCENE/hawor/per_frame/" | head
 ```
 
-## 9. Stage 51 — full replay (flow + trajectories + joints + meshes)
+## 11. Stage 51 — full replay (flow + trajectories + joints + meshes)
 
 ```bash
 python scripts/51_replay_with_joints.py --scene-dir "$SCENE"
@@ -315,7 +314,7 @@ Variants:
 - Skip overlays: `--no-meshes`, `--no-joints`, `--no-scene-flow`, `--no-trajectories`
 - Single label: `--labels laptop_up`
 
-## 10. Final sanity check
+## 12. Final sanity check
 
 ```bash
 jq '. | to_entries | map({label: .key,
@@ -324,7 +323,7 @@ jq '. | to_entries | map({label: .key,
                           visible: .value.n_frames_visible})' \
     "$SCENE/masks/tracking.json"
 
-ls "$SCENE/sam3d/" "$SCENE/any4d/" "$SCENE/aligned/" "$SCENE/hawor/" 2>/dev/null
+ls "$SCENE/sam3d/" "$SCENE/any4d/" "$SCENE/any6d/" "$SCENE/aligned/" "$SCENE/hawor/" 2>/dev/null
 jq . "$SCENE/any4d/config.json"
 jq '. | to_entries | map({label: .key, type: .value.type})' \
     "$SCENE/any4d/joints.json"
@@ -332,7 +331,7 @@ jq '{n: .total_hands, frames: .n_frames_with_hands}' \
     "$SCENE/hawor/config.json" 2>/dev/null
 ```
 
-## 11. (Optional) Author a two-body articulation scene
+## 13. (Optional) Author a two-body articulation scene
 
 A separate track that turns the sam3d meshes (stage 30) + HaWoR hands
 (stage 60) into a hinge/slide scene with the hand trajectory replayed on top.
