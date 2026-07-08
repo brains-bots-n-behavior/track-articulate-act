@@ -8,15 +8,18 @@ Set these once and the rest works as-is.
 ```bash
 SCENE=data/kitchen_pour_01
 SAM3D_REPO=/home/jeremy/research/Articulate4D/sam-3d-objects
-ANY4D_REPO=/home/jeremy/research/Articulate4D/Any4D
-WILOR_REPO=/home/jeremy/research/Articulate4D/WiLoR
-HAWOR_REPO=/home/jeremy/research/Articulate4D/HaWoR   # only for stage 60c
+DA3_ROOT=/home/jeremy/research/Articulate4D/depth-anything-3      # stage 00
+TRACKCRAFT_REPO=/home/jeremy/research/Articulate4D/TrackCraft3r   # stage 40
+TRACKCRAFT_CKPT=/path/to/trackcraft3r/model.safetensors          # stage 40
+HAWOR_REPO=/home/jeremy/research/Articulate4D/HaWoR   # stage 60
 ANY6D_REPO=/home/jeremy/research/Articulate4D/Any6D   # only for stage 32
 ```
 
-Stage order: **(05) → 10 → 20 → 30 → 40 → 50 → 52 → 60 → 51 (replay)**.
+Stage order: **(05) → 10 → 20 → 30 → 00 → 40 → 50 → 52 → 60 → 51 (replay)**.
 (05 is the optional prompt picker that feeds stage 10; 50 / 52 / 60 are
-independent — skip any if you don't need it.)
+independent — skip any if you don't need it.) Stage **00** (Depth-Anything-3)
+provides depth + cameras and stage **40** (TrackCraft3R) provides point
+tracking — together they replace Any4D; run **00 before 40**.
 
 ## 0. Normalize frame filenames (one-time per scene)
 
@@ -103,10 +106,10 @@ Variants:
   `--bg-mode white --bg-dilate 3 --bg-feather 2` tunes the fill, `--save-input`
   dumps the masked RGBA the model sees.
 
-## 5. Stage 40 — Any4D scene flow + MoGe depth
+## 5a. Stage 00 — Depth-Anything-3 depth + cameras/world frame
 
 Pick a reference frame (usually one of the stage-20 keyframes for the object
-you care about):
+you care about) — it seeds the dense reference pointmap:
 
 ```bash
 jq '. | to_entries | map({label: .key, keyframe: .value.keyframe})' \
@@ -115,22 +118,41 @@ REF_FRAME=42   # ← replace
 ```
 
 ```bash
-conda deactivate && conda activate any4d
+conda deactivate && conda activate da3
 
-python scripts/40_any4d_flow.py \
-    --scene-dir  "$SCENE" \
-    --any4d-repo "$ANY4D_REPO" \
-    --ref-frame  "$REF_FRAME" \
+python scripts/00_da3_depth_cameras.py \
+    --scene-dir "$SCENE" \
+    --da3-root  "$DA3_ROOT" \
+    --ref-frame "$REF_FRAME" \
+    --overwrite
+```
+
+Writes the geometry bundle to `$SCENE/any4d/` (depth, `cameras.npz`, intrinsics,
+`pointmap_ref.npy`). Variants: `--start-idx 20 --end-idx 80` for a subrange,
+`--model-name da3-large` for a smaller model.
+
+## 5b. Stage 40 — TrackCraft3R point tracking
+
+Runs TrackCraft3R on a fixed window starting at `--start-idx` and converts the
+tracks into per-label scene flow (world frame). The window's first frame is the
+reference, so set `--start-idx` to your `REF_FRAME`:
+
+```bash
+conda deactivate && conda activate trackcraft
+
+python scripts/40_trackcraft_flow.py \
+    --scene-dir       "$SCENE" \
+    --trackcraft-repo "$TRACKCRAFT_REPO" \
+    --checkpoint      "$TRACKCRAFT_CKPT" \
+    --start-idx "$REF_FRAME" --num-frames 12 --frame-stride 5 \
     --overwrite
 ```
 
 Variants:
-- OOM on a long clip: append `--start-idx 20 --end-idx 80`
-- Single label:       append `--labels mug`
-- Force fp32:         append `--no-amp`
+- Wider temporal span: `--frame-stride 10` (window = num-frames × frame-stride)
+- Single label:        append `--labels mug`
 
-Quick check that the Any4D bundle is reusable (RGB + MoGe depth + ref
-pointmap + scene flow):
+Quick check that the bundle is reusable (RGB + depth + ref pointmap + flow):
 
 ```bash
 python scripts/41_replay_in_rerun.py --scene-dir "$SCENE"
@@ -169,28 +191,16 @@ python scripts/52_align_meshes.py --scene-dir "$SCENE" --overwrite
 
 Default pipeline per label: apply `pose.json` (with PyTorch3D→RDF flip) →
 silhouette IoU + DT-chamfer + ICP refinement → bake camera-to-world for the
-keyframe. Saves an aligned GLB per label in Any4D's world frame.
+keyframe. Saves an aligned GLB per label in the shared world frame.
 
 Variants:
 - Higher rendering fidelity (slower): `--render-factor 2 --max-iters 600`
 - Enable mesh_alignment.py-style rescale for sam3d-body-like meshes: `--coarse`
 - Single label:                       `--labels laptop_up`
 
-When the automatic refinement misbehaves (typical for a hand, which is non-
-rigid) or you want to place the hand to visibly contact an object, run the
-manual gradio variant on that single label:
-
-```bash
-python scripts/52b_align_meshes_manual.py \
-    --scene-dir   "$SCENE" \
-    --label       hand \
-    --context-label laptop_up
-```
-
-Three orientation sliders + depth + scale + fine translation; live overlay
-of the mesh silhouette on the image. The "Save" button writes the same
-`aligned/<label>/{mesh.glb, align.json}` outputs so stage 51 picks it up
-automatically.
+For rigid objects, **stage 32 (Any6D)** is an object-level alternative that
+registers the mesh directly to the stage-00 depth — use it when the silhouette
+optimizer struggles.
 
 Sanity-check:
 
@@ -204,10 +214,12 @@ jq '{kf: .keyframe,
 ### (Optional) Stage 32 — Any6D 6D object pose
 
 An object-level alternative to the stage-52 silhouette alignment: Any6D
-registers each stage-30 mesh to the MoGe **metric** depth at the label's
-keyframe and returns a 6D object→camera pose (also baked to the Any4D world
-frame when `any4d/cameras.npz` exists). Needs stages 30 + 40; runs in the
-`any6d` GPU env. Restrict to rigid objects — skip `hand`/non-object parts.
+registers each stage-30 mesh to the stage-00 **metric** depth
+(`any4d/moge/depth`) at the label's keyframe and returns a 6D object→camera
+pose (also baked to the shared world frame when `any4d/cameras.npz` exists).
+Needs stages 30 + 00; runs in the `any6d` GPU env. Restrict to rigid objects —
+skip `hand`/non-object parts. (Note: DA3 depth is not guaranteed metric — see
+the stage-00 scale caveat if the poses look off.)
 
 **Headless-safe:** opens no GUI and renders nothing to a display (Any6D's
 refiner uses an offscreen CUDA rasterizer). All results are plain data files
@@ -246,7 +258,7 @@ to confirm each one sits where the real object is. Runs in the stage-41/51 env
 (`numpy` + `pillow` + `rerun-sdk`); reads only data files, writes nothing.
 
 ```bash
-conda deactivate && conda activate any4d
+conda deactivate && conda activate <replay-env>   # any env with numpy + pillow + rerun-sdk
 python scripts/33_visualize_any6d.py --scene-dir "$SCENE"
 ```
 
@@ -255,54 +267,34 @@ python scripts/33_visualize_any6d.py --scene-dir "$SCENE"
 - Headless server (no display): `--save-rrd "$SCENE/any6d/preview.rrd"`, then
   `scp` it and open with `rerun preview.rrd` on a workstation.
 
-## 8. Stage 60 — WiLoR hand tracking
+## 8. Stage 60 — HaWoR hand tracking
 
-```bash
-conda deactivate && conda activate wilor
-python scripts/60_wilor_hands.py \
-    --scene-dir   "$SCENE" \
-    --wilor-repo  "$WILOR_REPO" \
-    --overwrite
-```
-
-Per-frame YOLO detection + WiLoR fit → MANO mesh + 3D keypoints saved as
-compact npz under `wilor/per_frame/<frame>.npz`. If `any4d/cameras.npz` exists
-the script also bakes the camera-to-world transform so `verts_world` /
-`joints_world` are ready for stage 51.
-
-Variants:
-- Subrange + speedup: `--start-idx 20 --end-idx 80 --fast`
-- Cap detections:     `--max-hands 2`
-- Skip world bake:    `--no-world` (camera-frame output only)
-- Also dump .obj:     `--save-obj`
-
-(Legacy `wilor/` folder with hands ~30× too deep? Fix it in place without
-re-running: `python scripts/60b_rescale_wilor_focal.py --scene-dir "$SCENE"`.
-Current stage 60 already uses the real MoGe focal, so new runs don't need it.)
-
-**Alternative — stage 60c (HaWoR):** a video-temporal hand tracker (track +
-SLAM + in-fill) that writes `hawor/` with the *same npz schema* as `wilor/`, so
-downstream stages consume it identically. Use it when you want a temporally
-smooth two-hand trajectory (it fills frames the detector misses) rather than
-independent per-frame fits.
+Video-temporal two-hand tracker (detect/track → motion → DROID-SLAM → in-fill).
+Writes per-frame MANO mesh + 3D keypoints to `hawor/per_frame/<frame>.npz`; if
+`any4d/cameras.npz` exists it bakes the camera-to-world transform so
+`verts_world` / `joints_world` are ready for the scene-authoring track.
 
 ```bash
 conda deactivate && conda activate hawor
-python scripts/60c_hawor_hands.py \
+python scripts/60_hawor_hands.py \
     --scene-dir   "$SCENE" \
     --hawor-repo  "$HAWOR_REPO" \
     --overwrite
 ```
-Variants: `--detected-only` (drop in-filled hands), `--img-focal F` (override
-the MoGe focal), `--no-world` (camera frame only). See README stage 60c.
+
+Variants:
+- Detected only:    `--detected-only` (drop in-filled hands)
+- Force focal:      `--img-focal F` (override the auto MoGe focal)
+- Skip world bake:  `--no-world` (camera-frame output only)
+- Save subrange:    `--start-idx 20 --end-idx 80` (inference still runs the full clip)
 
 Sanity-check:
 
 ```bash
 jq '{n: .total_hands,
      frames: .n_frames_with_hands,
-     world: .world_frame_baked}' "$SCENE/wilor/config.json"
-ls "$SCENE/wilor/per_frame/" | head
+     world: .world_frame_baked}' "$SCENE/hawor/config.json"
+ls "$SCENE/hawor/per_frame/" | head
 ```
 
 ## 9. Stage 51 — full replay (flow + trajectories + joints + meshes)
@@ -330,17 +322,17 @@ jq '. | to_entries | map({label: .key,
                           visible: .value.n_frames_visible})' \
     "$SCENE/masks/tracking.json"
 
-ls "$SCENE/sam3d/" "$SCENE/any4d/" "$SCENE/aligned/" "$SCENE/wilor/" 2>/dev/null
+ls "$SCENE/sam3d/" "$SCENE/any4d/" "$SCENE/aligned/" "$SCENE/hawor/" 2>/dev/null
 jq . "$SCENE/any4d/config.json"
 jq '. | to_entries | map({label: .key, type: .value.type})' \
     "$SCENE/any4d/joints.json"
 jq '{n: .total_hands, frames: .n_frames_with_hands}' \
-    "$SCENE/wilor/config.json" 2>/dev/null
+    "$SCENE/hawor/config.json" 2>/dev/null
 ```
 
 ## 11. (Optional) Author a two-body articulation scene
 
-A separate track that turns the sam3d meshes (stage 30) + WiLoR hands
+A separate track that turns the sam3d meshes (stage 30) + HaWoR hands
 (stage 60) into a hinge/slide scene with the hand trajectory replayed on top.
 It does **not** need stages 50/52. Pick one editor, then optionally animate it
 in MuJoCo. See `README.md` for the full slider reference.

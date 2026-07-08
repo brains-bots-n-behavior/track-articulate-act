@@ -1,15 +1,15 @@
 #!/usr/bin/env python
-"""Stage 52 (MuJoCo variant): two-body articulation scene + WiLoR hand replay.
+"""Stage 52 (MuJoCo variant): two-body articulation scene + HaWoR hand replay.
 
 Loads two sam3d objects by label — one welded to ground, one attached via a
-hinge or slide joint — plus the full WiLoR hand trajectory played back as
+hinge or slide joint — plus the full HaWoR hand trajectory played back as
 an animation loop over all scene frames.
 
 Reads:
     data/<scene>/sam3d/<label-fixed>/[cand_NN_<kf>/]mesh.glb
     data/<scene>/sam3d/<label-moving>/[cand_NN_<kf>/]mesh.glb
-    data/<scene>/wilor/per_frame/<frame>.npz   (one per frame with detections)
-    data/<scene>/wilor/faces.npy               (shared MANO topology)
+    data/<scene>/hawor/per_frame/<frame>.npz   (one per frame with detections)
+    data/<scene>/hawor/faces.npy               (shared MANO topology)
     data/<scene>/frames/*.jpg                  (frame range for the loop)
 
 Editor (gradio sliders + MuJoCo passive viewer side-by-side):
@@ -25,7 +25,7 @@ Editor (gradio sliders + MuJoCo passive viewer side-by-side):
     - Animation: frame index slider iterating all data/<scene>/frames/*.jpg.
       Play/Pause runs a gr.Timer at --fps. Each frame, hand_left and hand_right
       are placed via best-fit rigid pose from canonical mesh -> per-frame
-      WiLoR verts. Lateralities with no detection at the current frame are
+      HaWoR verts. Lateralities with no detection at the current frame are
       moved off-screen.
     - Apply Scale: rebuilds the model so mesh scale takes effect (MuJoCo bakes
       scale at compile time).
@@ -164,10 +164,10 @@ def load_hand_trajectory(scene_dir: Path):
                 baseline slider can drop it next to the object.
     Canonical mesh = the first per-frame mesh seen for that laterality.
     """
-    per_frame_dir = scene_dir / "wilor" / "per_frame"
-    faces_p = scene_dir / "wilor" / "faces.npy"
+    per_frame_dir = scene_dir / "hawor" / "per_frame"
+    faces_p = scene_dir / "hawor" / "faces.npy"
     if not per_frame_dir.is_dir() or not faces_p.is_file():
-        sys.exit(f"error: WiLoR output missing under {scene_dir / 'wilor'}")
+        sys.exit(f"error: HaWoR output missing under {scene_dir / 'hawor'}")
     faces = np.load(faces_p).astype(np.int64)
 
     traj = {}
@@ -214,7 +214,7 @@ def _quat_mul(a, b):
 
 
 def euler_xyz_to_R(rx_deg, ry_deg, rz_deg):
-    """Intrinsic Rz @ Ry @ Rx — matches 52b."""
+    """Intrinsic Rz @ Ry @ Rx."""
     rx, ry, rz = np.deg2rad([rx_deg, ry_deg, rz_deg])
     cx, sx = np.cos(rx), np.sin(rx)
     cy, sy = np.cos(ry), np.sin(ry)
@@ -796,7 +796,7 @@ def make_ui(state: SceneState, save_dir: Path, provenance: dict, fps: float):
             with gr.Column():
                 gr.Markdown("### Hand baseline\n"
                             "Applied after trajectory centering: "
-                            "`p_world = R(rot)·(t_wilor − traj_centroid) + pos`")
+                            "`p_world = R(rot)·(t_hawor − traj_centroid) + pos`")
                 hpx = gr.Slider(-POS_RANGE, POS_RANGE, 0.0, step=0.005, label="pos X")
                 hpy = gr.Slider(-POS_RANGE, POS_RANGE, 0.0, step=0.005, label="pos Y")
                 hpz = gr.Slider(-POS_RANGE, POS_RANGE, 0.0, step=0.005, label="pos Z")
@@ -945,7 +945,7 @@ def main():
     frame_indices = list_scene_frames(scene_dir)
     n_with_hands = sum(1 for fi in frame_indices if fi in traj)
     print(f"trajectory: {len(frame_indices)} frames in scene, "
-          f"{n_with_hands} with WiLoR detections "
+          f"{n_with_hands} with HaWoR detections "
           f"({len(traj)} unique frames have data)")
 
     provenance = {

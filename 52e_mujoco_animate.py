@@ -4,15 +4,15 @@
 Reads the `rerun/transforms.json` produced by stage 52d and rebuilds the
 articulation as a real MuJoCo scene — fixed body welded to ground, moving
 body attached via a hinge or slide joint at the user-set pose, hand mocap
-bodies driven through the full WiLoR trajectory. Joint motion is generated
+bodies driven through the full HaWoR trajectory. Joint motion is generated
 on the fly (linear / triangle / sine / static) since the saved JSON only
 records the user's static drive snapshot.
 
 Reads:
     data/<scene>/rerun/transforms.json      (or --transforms PATH)
     data/<scene>/sam3d/<label>/[cand_NN_<kf>/]mesh.glb   (per provenance)
-    data/<scene>/wilor/per_frame/*.npz
-    data/<scene>/wilor/faces.npy
+    data/<scene>/hawor/per_frame/*.npz
+    data/<scene>/hawor/faces.npy
     data/<scene>/frames/*.jpg
 
 Writes (under data/<scene>/mujoco_anim/):
@@ -123,10 +123,10 @@ def list_scene_frames(scene_dir: Path):
 
 def load_hand_trajectory(scene_dir: Path):
     """Same as 52c/52d. Returns (traj, faces, canon, traj_centroids)."""
-    per_frame_dir = scene_dir / "wilor" / "per_frame"
-    faces_p = scene_dir / "wilor" / "faces.npy"
+    per_frame_dir = scene_dir / "hawor" / "per_frame"
+    faces_p = scene_dir / "hawor" / "faces.npy"
     if not per_frame_dir.is_dir() or not faces_p.is_file():
-        sys.exit(f"error: WiLoR output missing under {scene_dir / 'wilor'}")
+        sys.exit(f"error: HaWoR output missing under {scene_dir / 'hawor'}")
     faces = np.load(faces_p).astype(np.int64)
     traj = {}
     first = {False: None, True: None}
@@ -494,7 +494,7 @@ def main():
     frame_indices = list_scene_frames(scene_dir)
     n_with_hands = sum(1 for fi in frame_indices if fi in traj)
     print(f"trajectory: {len(frame_indices)} scene frames, "
-          f"{n_with_hands} with WiLoR hands")
+          f"{n_with_hands} with HaWoR hands")
 
     hand_stls = {}
     for is_right, name in [(False, "hand_left"), (True, "hand_right")]:

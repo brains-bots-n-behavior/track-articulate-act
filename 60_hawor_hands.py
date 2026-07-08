@@ -1,18 +1,17 @@
 #!/usr/bin/env python
-"""Stage 60c: video-temporal HaWoR hand tracking (MANO mesh + 3D keypoints).
+"""Stage 60: video-temporal HaWoR hand tracking (MANO mesh + 3D keypoints).
 
-Alternative to stage 60 (WiLoR). Where WiLoR fits each frame independently,
 HaWoR runs a full video pipeline — detect/track -> per-frame motion estimation
 -> masked DROID-SLAM (camera trajectory + metric scale) -> a transformer
 in-filler that completes both hands across the whole clip. The result is a
 temporally smooth, two-hand (left=0, right=1) trajectory in a SLAM world frame.
 
 This stage runs that pipeline on data/<scene>/frames/ and re-projects the hands
-into the **camera frame** of each image (RDF / OpenCV, matching MoGe, Any4D and
-stage-60 WiLoR), then writes a per-frame npz with the SAME schema as
-60_wilor_hands.py so downstream stages can consume `hawor/` exactly like
-`wilor/`. If any4d/cameras.npz exists, the identical cam->world transform WiLoR
-uses is baked in to produce `verts_world` / `joints_world` in the Any4D world.
+into the **camera frame** of each image (RDF / OpenCV, matching the stage-00
+depth + cameras), then writes a per-frame npz to `data/<scene>/hawor/` that the
+scene-authoring track (52c / 52d / 52e) consumes. If any4d/cameras.npz exists,
+the cam->world transform is baked in to produce `verts_world` / `joints_world`
+in the shared world frame.
 
 Reads:
     data/<scene>/frames/*.jpg
@@ -39,22 +38,21 @@ Writes:
             (verts_world)  (n_hands, 778, 3)   float32  — only if any4d/cameras.npz present
             (joints_world) (n_hands, 21, 3)    float32
 
-Schema differences vs. stage 60 (WiLoR): HaWoR has no YOLO confidence, so the
-`yolo_conf` field is replaced by `valid` (detected vs. in-filled). Left-hand
-meshes share `faces.npy` but with reversed winding (a convenience
-`faces_left.npy` with corrected winding is also written).
+Left-hand meshes share `faces.npy` but with reversed winding (a convenience
+`faces_left.npy` with corrected winding is also written). The `valid` field
+marks detected (True) vs. in-filled (False) hands.
 
 Run inside the `hawor` conda env (see project notes: torch 2.0.1+cu118 on
 dsailogin). Needs a GPU.
 
 Examples:
-    python scripts/60c_hawor_hands.py \\
+    python scripts/60_hawor_hands.py \\
         --scene-dir data/oven \\
         --hawor-repo /home/jeremy/research/Articulate4D/HaWoR
 
     # Save only frames where the hand was actually detected (drop in-filled), and
     # force a focal length instead of using the MoGe one.
-    python scripts/60c_hawor_hands.py \\
+    python scripts/60_hawor_hands.py \\
         --scene-dir data/oven \\
         --hawor-repo /home/jeremy/research/Articulate4D/HaWoR \\
         --detected-only --img-focal 1500 --overwrite
@@ -75,7 +73,7 @@ import torch
 
 
 # ---------------------------------------------------------------------------
-# Geometry / IO helpers — identical conventions to 60_wilor_hands.py
+# Geometry / IO helpers
 # ---------------------------------------------------------------------------
 
 
@@ -324,7 +322,7 @@ def main():
     # frame index for each pipeline timestep, from the (natsorted) image names
     frame_indices = [int(Path(f).stem) for f in imgfiles]
 
-    # Shared MANO topology (standard right-hand winding -> matches WiLoR).
+    # Shared MANO topology (standard right-hand winding).
     faces = np.asarray(get_mano_faces(), dtype=np.int32)
     np.save(out_root / "faces.npy", faces)
     np.save(out_root / "faces_left.npy", faces[:, [0, 2, 1]])
@@ -400,7 +398,7 @@ def main():
 
     config = {
         "scene_id": scene_dir.name,
-        "stage": "60c_hawor_hands",
+        "stage": "60_hawor_hands",
         "hawor_repo": str(hawor_repo),
         "checkpoint": str(ckpt),
         "infiller_weight": str(infiller),

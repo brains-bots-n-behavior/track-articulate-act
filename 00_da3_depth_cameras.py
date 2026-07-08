@@ -5,7 +5,7 @@ Drop-in replacement for the *depth and camera* portions of the old Any4D
 stage 40 when you don't want to run Any4D (pair it with the TrackCraft3R
 stage 40, `40_trackcraft_flow.py`, for point tracking). Runs DA3 once over the
 clip and writes the same on-disk layout the downstream stages read, so
-stages 52 (align), 60 (WiLoR world-bake), 51/41/33 (replay), and 32 (Any6D)
+stages 52 (align), 60 (HaWoR world-bake), 51/41/33 (replay), and 32 (Any6D)
 consume it without changes.
 
 Adapted from TrackCraft3r/scripts/preprocess_da3.py, but instead of dumping
@@ -34,7 +34,7 @@ Conventions (verified against consumers):
   * Depth is z-depth in the RDF camera frame, same as MoGe (52_align_meshes.py
     back_project treats it as z). DA3 emits z-depth directly.
   * DA3's extrinsics are WORLD-TO-CAMERA (see preprocess_da3.py header); the
-    pipeline stores CAMERA-TO-WORLD (60_wilor_hands.py builds R_c2w/t_c2w from
+    pipeline stores CAMERA-TO-WORLD (60_hawor_hands.py builds R_c2w/t_c2w from
     cam_quats_xyzw/cam_trans and does p_world = R_c2w @ p_cam + t_c2w). We
     invert here so the stored pose is C2W.
   * The world frame is DA3's own (frame-0 not re-normalized). It is arbitrary

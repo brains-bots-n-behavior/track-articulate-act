@@ -31,11 +31,7 @@ data/<scene>/
 ├── aligned/                # stage 52 writes here (mesh.glb in the world frame + align.json)
 ├── any6d/                  # stage 32 writes here (Any6D 6D pose per label)
 │   └── <label>/{pose.txt, pose.json, K.txt, final_mesh.glb, mesh_world.glb}
-├── wilor/                  # stage 60 writes here (per-frame hand mesh + joints); 60b rescales in place
-│   ├── config.json
-│   ├── faces.npy           # shared MANO topology
-│   └── per_frame/<frame>.npz  # verts, joints, is_right, cam_t, bbox; +verts_world if cam pose known
-├── hawor/                  # stage 60c writes here (video-temporal alt to wilor/; same npz schema)
+├── hawor/                  # stage 60 writes here (video-temporal HaWoR hands)
 │   ├── config.json
 │   ├── faces.npy           # shared MANO topology (faces_left.npy for left-hand winding)
 │   ├── _work/              # cached HaWoR seq intermediates (tracks, SLAM, params)
@@ -47,7 +43,7 @@ data/<scene>/
 
 Stages **52c / 52d / 52e** are an optional *scene-authoring* track (build a
 two-body articulation + hand-trajectory scene). They read stage-30 sam3d
-meshes and stage-60 WiLoR hands directly, so they need 30 + 60 but not the
+meshes and stage-60 HaWoR hands directly, so they need 30 + 60 but not the
 50/52 fit. 52d's `transforms.json` feeds 52e.
 
 | stage | script | env | what it does |
@@ -59,19 +55,16 @@ meshes and stage-60 WiLoR hands directly, so they need 30 + 60 but not the
 | 20 | `20_pick_keyframes.py` | any (numpy + cv2) | score visible frames, pick per-label keyframes |
 | 30 | `30_sam3d_reconstruct.py` | `sam3d-objects` | per-label 3D reconstruction (splat + mesh + pose) |
 | 31 | `31_visualize_mesh.py` | any (trimesh; + pyrender for `--format png`) | headless HTML / PNG render of a stage-30 (or stage-52) `mesh.glb` |
-| 32 | `32_any6d_pose.py` | `any6d` (GPU; nvdiffrast + open3d + FoundationPose) | per-label Any6D 6D pose: register sam3d mesh to MoGe metric depth at the keyframe (needs 30 + 40) |
+| 32 | `32_any6d_pose.py` | `any6d` (GPU; nvdiffrast + open3d + FoundationPose) | per-label Any6D 6D pose: register sam3d mesh to the stage-00 depth at the keyframe (needs 30 + 00) |
 | 40 | `40_trackcraft_flow.py` | TrackCraft3R env | TrackCraft3R point tracking → per-label scene flow (reads stage 00; Any4D substitute) |
 | 41 | `41_replay_in_rerun.py` | rerun + numpy | minimal replay of the stage-40 bundle |
 | 50 | `50_estimate_joint.py` | any (numpy + scipy) | per-label joint type + axis estimation |
 | 51 | `51_replay_with_joints.py` | rerun | stage-41 replay + joint axes + sam3d / aligned meshes |
 | 52 | `52_align_meshes.py` | any (numpy + cv2 + trimesh + scipy) | align sam3d mesh to image/mask at the keyframe (automatic) |
-| 52b | `52b_any6d_align.py` | any (trimesh) | **[placeholder]** bake the stage-32 Any6D pose into `aligned/` (alternative to 52's silhouette/ICP) |
-| 52c | `52c_mujoco_scene.py` | any (mujoco + gradio + trimesh) | interactive MuJoCo editor: two-body joint scene + WiLoR hand replay → `mujoco/scene.xml` |
+| 52c | `52c_mujoco_scene.py` | any (mujoco + gradio + trimesh) | interactive MuJoCo editor: two-body joint scene + HaWoR hand replay → `mujoco/scene.xml` |
 | 52d | `52d_rerun_scene.py` | any (rerun + gradio + trimesh) | Rerun version of 52c (+ scene flow / pointcloud) → `rerun/transforms.json` |
 | 52e | `52e_mujoco_animate.py` | any (mujoco + trimesh) | replay a saved 52d scene as a real animated MuJoCo articulation |
-| 60 | `60_wilor_hands.py` | `wilor` (torch 2.12+cu130) | per-frame WiLoR hand mesh + 3D keypoints |
-| 60b | `60b_rescale_wilor_focal.py` | any (numpy) | post-fix legacy WiLoR npz to the real MoGe focal length (depth correction, in place) |
-| 60c | `60c_hawor_hands.py` | `hawor` (torch 2.0.1+cu118) | video-temporal HaWoR hands (track + SLAM + infill) → `hawor/`, same npz schema as 60 |
+| 60 | `60_hawor_hands.py` | `hawor` (torch 2.0.1+cu118) | video-temporal HaWoR hands (track + SLAM + infill) → `hawor/` |
 
 ---
 
@@ -595,7 +588,7 @@ python scripts/31_visualize_mesh.py --scene-dir data/<scene> --labels mug --cand
 # Offscreen PNGs instead of HTML
 python scripts/31_visualize_mesh.py --scene-dir data/<scene> --format png
 
-# The aligned meshes, together in the Any4D world frame, one combined file
+# The aligned meshes, together in the world frame, one combined file
 python scripts/31_visualize_mesh.py --scene-dir data/<scene> \
     --mesh-source aligned --combine
 
@@ -623,14 +616,16 @@ layout. For each label, Any6D registers the **stage-30 mesh** to the masked
 metric pointcloud at that label's keyframe and returns the object→camera 6D
 pose, while also rescaling the mesh to metric size via its oriented-bounding-box
 ratio fit. **Not part of the core order** — it's an object-level alternative to
-the stage-52 silhouette alignment, and needs stages 30 + 40 (it reuses the
-MoGe metric depth + intrinsics; stage 52 it does not need).
+the stage-52 silhouette alignment, and needs stages 30 + 00 (it reuses the
+stage-00 depth + intrinsics under `any4d/moge/`; stage 52 it does not need).
 
-The MoGe depth is **already metric** (meters), so unlike the Any6D demo there is
-no `depth_scale` divisor — the `.npy` is fed straight in. Pixels are restricted
-to valid metric depth (mask ∩ `depth>0` ∩ MoGe valid mask) so holes don't inject
-`(0,0,0)` points into the OBB fit. If `any4d/cameras.npz` is present the pose is
-also baked into the **Any4D world frame** (same cam→world convention as stages
+The stage-00 depth is treated as **metric** (meters), so there is no
+`depth_scale` divisor — the `.npy` is fed straight in. Pixels are restricted
+to valid depth (mask ∩ `depth>0` ∩ valid-depth mask) so holes don't inject
+`(0,0,0)` points into the OBB fit. (DA3 depth is not guaranteed metric — if the
+poses look off, that scale mismatch is the first thing to check.) If
+`any4d/cameras.npz` is present the pose is
+also baked into the **world frame** (same cam→world convention as stages
 52 / 60), and `mesh_world.glb` is the mesh placed there — ready to overlay
 alongside `aligned/` meshes in a stage-51-style viewer. Without `cameras.npz`
 it instead writes `mesh_cam.glb` (camera frame).
@@ -651,7 +646,7 @@ render-less server.
 | `pose.json` | structured: `pose_object_to_camera`, `pose_object_to_world` (if cam pose known), `cam_to_world`, `keyframe`, `K`, provenance |
 | `K.txt` | the 3×3 intrinsics used |
 | `final_mesh.glb` | Any6D's metric-rescaled mesh, in its own object frame |
-| `mesh_world.glb` | that mesh placed by the estimated pose into the Any4D world frame (or `mesh_cam.glb` if no `cameras.npz`) |
+| `mesh_world.glb` | that mesh placed by the estimated pose into the world frame (or `mesh_cam.glb` if no `cameras.npz`) |
 
 ### CLI flags
 
@@ -718,7 +713,7 @@ multi-instance `<label>_1` reconstructions, or an empty sam3d folder) are
 
 The alignment check for stage 32. For every label with a `mesh_world.glb`, it
 logs the posed mesh into Rerun **on top of a scene point cloud in the same
-Any4D world frame** (no extra transform on the mesh — the stage-32 pose is
+world frame** (no extra transform on the mesh — the stage-32 pose is
 authoritative, exactly as stage 51 renders `aligned/` meshes), so you can
 eyeball whether each object sits where the real geometry is. Same blueprint as
 stages 41/51 (white background, RDF coordinates, no line grid). Labels with an
@@ -728,7 +723,7 @@ message**; a label that only has `mesh_cam.glb` (stage 32 ran without
 
 Two point-cloud sources (`--point-source`):
 
-- `any4d` *(default)* — the Any4D reference pointmap (`pointmap_ref.npy`), one
+- `any4d` *(default)* — the stage-00 reference pointmap (`pointmap_ref.npy`), one
   global cloud for the whole scene, coloured by the ref-frame RGB and masked to
   MoGe's valid pixels (the same cloud stages 41/51 draw). Best for a quick "does
   everything sit together" look. It is a **single frame** (`config.ref_frame`),
@@ -766,7 +761,7 @@ or `--serve` to serve it over the web.
 ```bash
 conda activate any4d   # any env with numpy + pillow + rerun-sdk
 
-# Spawn the viewer: global Any4D cloud + all posed meshes
+# Spawn the viewer: global scene cloud + all posed meshes
 python scripts/33_visualize_any6d.py --scene-dir data/<scene>
 
 # Check one object against the MoGe depth at its own keyframe
@@ -786,67 +781,75 @@ part that moved away from the reference frame — re-check with `moge`).
 
 ---
 
-## Stage 40 — Any4D scene flow + MoGe depth
+## Stage 40 — TrackCraft3R point tracking → per-label scene flow
 
-**Env:** `any4d`
-**Reads:** `frames/*.jpg`, `masks/<label>/<ref>.png` (ref-frame masks),
-`masks/tracking.json`
-**Writes:** scene-level under `any4d/`, sparse per-label flow under `any4d/<label>/`
+**Env:** TrackCraft3R env
+**Reads:** `frames/*.jpg`, `masks/tracking.json`, `masks/<label>/<ref>.png`,
+and the stage-00 bundle (`any4d/moge/depth`, `any4d/moge/intrinsics.npz`,
+`any4d/cameras.npz`)
+**Writes:** per-label tracking under `any4d/<label>/`; updates `config.json`;
+recomputes `pointmap_ref.npy`
 
-Runs Any4D once over the full `[start, end)` frame range with a single
-`--ref-frame`, plus MoGe per-frame at FULL image resolution. Scene flow is
-saved sparsely — only the pixels belonging to each label's mask at the ref
-frame end up in `scene_flow/<frame>.npy`. Two resolutions are recorded in
-`config.json`:
+Replaces the *scene-flow* half of the old Any4D stage 40. Runs TrackCraft3R
+once on a fixed window of frames and converts its dense, frame-0-anchored 3D
+track field into the same per-label schema (`pts3d_ref.npy`,
+`scene_flow/<frame>.npy`, `pixel_ij.npy`, `ref_mask.png`) that stages 50 / 51 /
+41 already read. **Run stage 00 first** — this stage reads its depth + cameras.
 
-- `model_resolution_wh` — Any4D's internal (~518×336, patch-aligned). Pointmap,
-  per-frame cameras, scene flow are stored at this resolution.
-- `full_resolution_wh` — original clip resolution. MoGe depth + intrinsics
-  are stored here so they can be used by later stages without a re-projection.
+**Frame window (unlike Any4D's stride-1 full range):** TrackCraft3R runs on a
+fixed-length window
+`tracked_frames = [start_idx + k·frame_stride for k in range(num_frames)]`,
+with `ref_frame = tracked_frames[0]`. Scene flow is written only for those
+frames (50/51 guard on file presence, so a sparse set is fine). Pick a window
+that spans real motion so stage 50 can localize an axis.
+
+**Coordinate frame:** TrackCraft3R returns tracks in the reference *camera*
+frame; this stage lifts them to the shared **world frame** using the ref
+frame's camera-to-world from `any4d/cameras.npz` (scene flow is a difference of
+world points, so only the rotation applies). That keeps joint axes (stage 50)
+and meshes (stage 52) in one frame for stage 51.
 
 ### CLI flags
 
 | flag | default | meaning |
 |---|---|---|
-| `--scene-dir PATH` | — *(required)* | |
-| `--any4d-repo PATH` | — *(required)* | Path to the `Any4D/` checkout |
-| `--checkpoint PATH` | `<any4d-repo>/checkpoints/any4d_4v_combined.pth` | |
-| `--ref-frame INT` | — *(required)* | Frame index used as Any4D's reference |
-| `--start-idx INT` | `0` | Inclusive start index |
-| `--end-idx INT` | end of clip | Exclusive end index |
-| `--labels LIST` | all | Subset of labels to write flow for |
-| `--machine STR` | `local` | Hydra `machine` override |
-| `--data-norm-type` | `dinov2` | |
-| `--no-amp` | off | Disable autocast (use fp32) |
-| `--overwrite` | off | Replace existing `any4d/` |
+| `--scene-dir PATH` | — *(required)* | Needs stages 00 + 10 done |
+| `--trackcraft-repo PATH` | — *(required)* | Path to the TrackCraft3r checkout |
+| `--checkpoint PATH` | — *(required)* | TrackCraft3R model `.safetensors` |
+| `--start-idx INT` | `0` | Scene index of the window's first (reference) frame |
+| `--num-frames INT` | `12` | Frames per model run (training length) |
+| `--frame-stride INT` | `5` | Sample every Nth frame |
+| `--labels LIST` | all | Subset of labels to track |
+| `--height / --width` | `480 / 832` | Model canvas resolution |
+| `--resize-mode` | `stretch` | `stretch` keeps the mask↔track pixel mapping trivial |
+| `--diag-max-depth` / `--pj-norm-percentile-lo/hi` | `80` / `2` / `98` | Predictor normalization |
+| `--overwrite` | off | Replace existing per-label tracking outputs |
 
 ### Invocations
 
-Pick a sensible `--ref-frame` (usually one of the stage-20 keyframes for an
-object you care about) and run:
-
 ```bash
-conda activate any4d
-python scripts/40_any4d_flow.py \
-    --scene-dir  data/kitchen_pour_01 \
-    --any4d-repo /path/to/Any4D \
-    --ref-frame  42 \
+conda activate trackcraft
+python scripts/40_trackcraft_flow.py \
+    --scene-dir       data/kitchen_pour_01 \
+    --trackcraft-repo /path/to/TrackCraft3r \
+    --checkpoint      /path/to/trackcraft3r/model.safetensors \
+    --start-idx 0 --num-frames 12 --frame-stride 5 \
     --overwrite
 ```
 
-OOM on a long clip? Narrow the range:
+Longer motions? Widen the temporal span with a bigger stride:
 ```bash
-python scripts/40_any4d_flow.py \
-    --scene-dir  data/kitchen_pour_01 \
-    --any4d-repo /path/to/Any4D \
-    --ref-frame  42 --start-idx 20 --end-idx 80
+python scripts/40_trackcraft_flow.py \
+    --scene-dir data/kitchen_pour_01 \
+    --trackcraft-repo /path/to/TrackCraft3r \
+    --checkpoint /path/to/trackcraft3r/model.safetensors \
+    --start-idx 10 --num-frames 12 --frame-stride 10
 ```
 
 ### Quick sanity check
 
 ```bash
-jq . data/<scene>/any4d/config.json
-ls data/<scene>/any4d/                            # cameras.npz, pointmap_ref.npy, moge/, <labels>/
+jq '{tracker, ref_frame, tracked_frames, labels_processed}' data/<scene>/any4d/config.json
 ls data/<scene>/any4d/<label>/scene_flow/ | head
 ```
 
@@ -964,7 +967,7 @@ Open `data/<scene>/any4d/<label>/joint.json` to see step-by-step results
 **Reads:** `sam3d/<label>/[cand_NN_<kf>/]{mesh.glb, pose.json, keyframe.txt}`,
 `masks/<label>/<kf>.png`, `any4d/moge/depth/<kf>.npy`,
 `any4d/moge/intrinsics.npz`, `any4d/cameras.npz`
-**Writes:** `aligned/<label>/mesh.glb` (in Any4D world frame) and
+**Writes:** `aligned/<label>/mesh.glb` (in world frame) and
 `aligned/<label>/align.json`
 
 Per label, using each label's recorded keyframe:
@@ -988,7 +991,7 @@ Per label, using each label's recorded keyframe:
    Renders at `--render-factor` downsampled resolution with `--max-faces`
    random face subsample.
 4. **Bake camera-to-world.** Apply the keyframe's `cam_quats_xyzw` +
-   `cam_trans` from `any4d/cameras.npz`, so the saved mesh sits in Any4D's
+   `cam_trans` from `any4d/cameras.npz`, so the saved mesh sits in the shared
    world frame and stage 51 can render it without any extra transform.
 
 ### CLI flags
@@ -1034,92 +1037,12 @@ jq '{kf: .keyframe,
 
 ---
 
-## Stage 52b — manual gradio-based alignment
-
-**Env:** any with `gradio`, `numpy`, `opencv-python`, `trimesh`
-**Reads:** same inputs as stage 52
-**Writes:** same outputs as stage 52 (`aligned/<label>/{mesh.glb, align.json}`),
-but with `align.json.method = "manual (52b)"`
-
-Use when stage 52's automatic refinement misbehaves — typical case is a hand
-(non-rigid; rigid silhouette/ICP can converge to spurious local minima) or
-when you want to deliberately place the hand so it visibly contacts another
-object in the scene.
-
-### Initial placement (done once at startup)
-
-1. Apply sam3d's `pose.json` with the PyTorch3D→RDF flip.
-2. Project the result; compute the mesh 2D centroid and the mask 2D centroid;
-   shift XY in 3D so the projections coincide.
-3. Sample MoGe depth at the mask 2D centroid; translate Z so the mesh's
-   centroid sits at that depth.
-
-### Sliders
-
-| group | sliders | range |
-|---|---|---|
-| Orientation | Rotation X / Y / Z (deg) | ±180 |
-| Depth + scale | Depth (camera +Z, m), Scale multiplier | depth ∈ [init−1, init+2], scale ∈ [0.3, 3.0] |
-| Fine translation | Tx, Ty, Tz (m) | ±0.5 (Tz is *added* on top of Depth) |
-
-The "Depth + scale" pair is the right knob for putting a hand in contact with
-an object: drop the hand mesh to the object's depth, then dial the scale up
-or down so the projection still matches the mask. Scale and depth jointly
-determine apparent size — adjust them together to slide the hand back and
-forth in 3D without disturbing its 2D footprint.
-
-### Overlay (live)
-
-- **Red Lambertian-shaded** mesh — translucent or fully opaque, opacity
-  controlled by the **Mesh opacity** slider (`0.10`–`1.00`, default `0.85`).
-  Per-face shading + painter's-algorithm depth ordering gives proper 3D
-  shape perception rather than a flat fill.
-- **Red outline** around the silhouette so the boundary stays sharp at low
-  opacity.
-- **Green** outline — the label's mask.
-- **Blue** shaded fill — context mesh (only if `--context-label` is set).
-- IoU + centroid + depth + scale + α displayed beneath the image.
-
-### Performance
-
-The live render uses quadric-decimated geometry (`--decimate-faces`,
-default 30 000) so each slider update lands in ~70 ms even for a 500 K-face
-sam3d mesh. The save path uses the **full** original mesh — decimation is
-preview-only. Falls back to the full mesh (or `--max-render-faces` random
-subsample) if the `fast-simplification` package isn't installed.
-
-### CLI flags
-
-| flag | default | meaning |
-|---|---|---|
-| `--scene-dir PATH` | — *(required)* | |
-| `--label STR` | — *(required)* | Which sam3d label to align manually |
-| `--candidate INT` | `0` | sam3d candidate index |
-| `--context-label STR` | — | Render `aligned/<context>/mesh.glb` as blue (e.g. the object the hand should touch) |
-| `--decimate-faces INT` | `30000` | Target face count for the topology-preserving live-render mesh (needs `fast-simplification`; falls back gracefully). Save uses full geometry. |
-| `--max-render-faces INT` | `0` | Random-subsample fallback if decimation is unavailable; `0` = full mesh |
-| `--render-factor INT` | `2` | Downscale factor for live rasterization |
-| `--port INT` | `7860` | Gradio port |
-| `--share` | off | Public gradio URL |
-
-### Invocations
-
-```bash
-# Align the hand, with the laptop lid as visual context
-python scripts/52b_align_meshes_manual.py \
-    --scene-dir data/macbook-all \
-    --label hand \
-    --context-label laptop_up
-
-# Pick a different sam3d candidate
-python scripts/52b_align_meshes_manual.py \
-    --scene-dir data/macbook-all \
-    --label hand \
-    --candidate 1 --port 7870
-```
-
-When saved, stage 51 picks up the result automatically (`--mesh-source auto`
-prefers `aligned/`).
+> **Object-level alignment alternative:** for rigid objects, **stage 32
+> (Any6D)** already registers the sam3d mesh directly to the metric pointcloud
+> and returns a world-frame pose (`any6d/<label>/mesh_world.glb`) — use it
+> instead of stage 52 when the silhouette optimizer struggles. (The former
+> `52b` manual gradio aligner and Any6D-52b placeholder have been removed;
+> stage 32 covers that need.)
 
 ---
 
@@ -1127,8 +1050,8 @@ prefers `aligned/`).
 
 An optional branch for building a **two-body articulation scene** (one body
 welded to ground, one attached via a hinge or slide joint) with the full
-WiLoR hand trajectory played back on top. It reads stage-30 sam3d meshes and
-stage-60 WiLoR hands **directly** — it does *not* require the stage-50/52
+HaWoR hand trajectory played back on top. It reads stage-30 sam3d meshes and
+stage-60 HaWoR hands **directly** — it does *not* require the stage-50/52
 joint fit or aligned meshes. Typical flow:
 
 ```
@@ -1144,12 +1067,12 @@ prefer. 52e consumes the `rerun/transforms.json` that 52d writes.
 
 **Env:** any with `mujoco` + `gradio` + `numpy` + `trimesh`
 **Reads:** `sam3d/<label-fixed>/[cand_NN_<kf>/]mesh.glb`,
-`sam3d/<label-moving>/...mesh.glb`, `wilor/per_frame/<frame>.npz`,
-`wilor/faces.npy`, `frames/*.jpg`
+`sam3d/<label-moving>/...mesh.glb`, `hawor/per_frame/<frame>.npz`,
+`hawor/faces.npy`, `frames/*.jpg`
 **Writes:** `mujoco/scene.xml` + `mujoco/transforms.json`
 
 A gradio slider panel beside a live MuJoCo passive viewer. You position the
-two bodies and the joint, scrub the WiLoR hand trajectory, and save a real
+two bodies and the joint, scrub the HaWoR hand trajectory, and save a real
 MJCF.
 
 - **Fixed body** — pos (m), euler XYZ (deg), scale. Welded to ground.
@@ -1162,7 +1085,7 @@ MJCF.
   MJCF carries the real joint).
 - **Animation** — frame slider over every `frames/*.jpg`; Play/Pause runs a
   `gr.Timer` at `--fps`. Each frame, `hand_left` / `hand_right` are placed by
-  best-fit rigid pose from the canonical MANO mesh to that frame's WiLoR
+  best-fit rigid pose from the canonical MANO mesh to that frame's HaWoR
   verts; a laterality with no detection that frame is moved off-screen.
 - **Apply Scale** rebuilds the model (MuJoCo bakes mesh scale at compile
   time).
@@ -1209,14 +1132,14 @@ python scripts/52c_mujoco_scene.py \
 ## Stage 52d — Rerun version of the editor (+ scene flow / pointcloud)
 
 **Env:** any with `rerun-sdk` + `gradio` + `numpy` + `trimesh` + `pillow`
-**Reads:** same sam3d meshes + WiLoR hands as 52c, **plus** the stage-40
+**Reads:** same sam3d meshes + HaWoR hands as 52c, **plus** the stage-40
 bundle: `any4d/{config.json, pointmap_ref.npy, moge/mask/*}` and
 `any4d/<label>/{pts3d_ref.npy, scene_flow/<frame>.npy}`
 **Writes:** `rerun/transforms.json`
 
 Same slider grid as 52c, but the viewer is Rerun rather than MuJoCo: meshes
 are uploaded once as static archetypes and slider edits only re-log cheap
-`Transform3D`s, so updates are immediate. It additionally renders the Any4D
+`Transform3D`s, so updates are immediate. It additionally renders the
 reference pointcloud and per-label scene-flow arrows for context. No real
 joint constraint is enforced — the drive slider applies the motion manually.
 
@@ -1240,8 +1163,8 @@ fields), and auto-loads at startup if it already exists.
 | `--joint {hinge,slide}` | `hinge` | |
 | `--frame-time-step FLOAT` | `0.2` | Seconds per frame on the `stable_time` timeline (matches stage 41) |
 | `--max-faces INT` | `150000` | Quadric-decimate each mesh (`0` = none; Rerun handles big meshes but slows above ~200k faces) |
-| `--no-scene-flow` | off | Don't render Any4D scene-flow arrows |
-| `--no-pointcloud` | off | Don't render the Any4D reference pointcloud |
+| `--no-scene-flow` | off | Don't render scene-flow arrows |
+| `--no-pointcloud` | off | Don't render the reference pointcloud |
 | `--max-arrows INT` | `500` | Subsample scene-flow arrows per label per frame |
 | `--load-transforms PATH` | `<scene>/rerun/transforms.json` if present | transforms.json to restore at startup |
 | `--no-load-transforms` | off | Skip auto-load; start from pointcloud-anchored defaults |
@@ -1264,15 +1187,15 @@ python scripts/52d_rerun_scene.py \
 
 **Env:** any with `mujoco` + `numpy` + `trimesh`
 **Reads:** `rerun/transforms.json` (or `--transforms PATH`), the sam3d
-`mesh.glb`s named in its provenance, `wilor/per_frame/*.npz`,
-`wilor/faces.npy`, `frames/*.jpg`
+`mesh.glb`s named in its provenance, `hawor/per_frame/*.npz`,
+`hawor/faces.npy`, `frames/*.jpg`
 **Writes (under `mujoco_anim/`):** `scene.xml` (a re-runnable MJCF),
 `object_fixed.stl`, `object_moving.stl`, `hand_left.stl` /
 `hand_right.stl` (only the lateralities the trajectory contains)
 
 Rebuilds a 52d scene as a **real** MuJoCo articulation — fixed body welded to
 ground, moving body on a hinge/slide joint at the saved pose, hand mocap
-bodies driven through the full WiLoR trajectory. The joint motion is
+bodies driven through the full HaWoR trajectory. The joint motion is
 generated on the fly: by default it replays the saved `joint_keyframes` if
 present, otherwise a linear sweep `0 → drive_at_save`.
 
@@ -1313,158 +1236,7 @@ python scripts/52e_mujoco_animate.py --scene-dir data-final/dryer \
 
 ---
 
-## Stage 60 — WiLoR hand tracking
-
-**Env:** `wilor` (project memory: torch 2.12+cu130, on remote dsailogin)
-**Reads:** `frames/*.jpg`, `<wilor-repo>/pretrained_models/{wilor_final.ckpt,
-model_config.yaml, detector.pt}`, optionally `any4d/cameras.npz` for
-world-frame baking
-**Writes:** `wilor/{config.json, faces.npy, per_frame/<frame>.npz}`
-
-Per frame: YOLO hand detection → WiLoR fit per hand → compact npz with the
-778-vertex MANO mesh and 21 3D keypoints, already in camera frame (RDF,
-matches MoGe / Any4D). If `any4d/cameras.npz` is present the script also
-bakes the camera-to-world transform for each frame and adds `verts_world` /
-`joints_world` fields ready for stage-51 rendering.
-
-### Per-frame npz fields
-
-| key | shape | dtype | meaning |
-|---|---|---|---|
-| `verts` | `(n_hands, 778, 3)` | float32 | mesh verts in camera frame (cam_t already applied) |
-| `joints` | `(n_hands, 21, 3)` | float32 | MANO keypoints in camera frame |
-| `is_right` | `(n_hands,)` | bool | right=True, left=False |
-| `cam_t` | `(n_hands, 3)` | float32 | translation applied to canonical verts |
-| `bbox` | `(n_hands, 4)` | float32 | YOLO detection bbox, xyxy in image coords |
-| `yolo_conf` | `(n_hands,)` | float32 | YOLO detection confidence |
-| `focal_length` | `()` | float32 | per-frame WiLoR focal (auto-computed) |
-| `img_size_wh` | `(2,)` | int32 | image width, height |
-| `frame_idx` | `()` | int32 | source frame index |
-| `verts_world` | `(n_hands, 778, 3)` | float32 | *(if cam pose known)* world frame |
-| `joints_world` | `(n_hands, 21, 3)` | float32 | *(if cam pose known)* world frame |
-
-Shared MANO topology is at `wilor/faces.npy` (`(Nf, 3)` int32) — load once,
-reuse across frames. Frames with zero detections are simply omitted.
-
-### CLI flags
-
-| flag | default | meaning |
-|---|---|---|
-| `--scene-dir PATH` | — *(required)* | |
-| `--wilor-repo PATH` | — *(required)* | Path to `WiLoR/` checkout |
-| `--checkpoint` | `wilor_final.ckpt` | filename under `pretrained_models/` |
-| `--model-config` | `model_config.yaml` | |
-| `--detector` | `detector.pt` | |
-| `--start-idx INT` | `0` | Inclusive frame index start |
-| `--end-idx INT` | end of clip | Exclusive end |
-| `--detector-conf FLOAT` | `0.3` | YOLO confidence threshold |
-| `--rescale-factor FLOAT` | `2.0` | Bbox padding factor for the crop |
-| `--max-hands INT` | none | Cap to top-N detections per frame |
-| `--batch-size INT` | `16` | WiLoR fit batch within a single frame |
-| `--fast` | off | FP16 + `torch.compile` + layer drop for speed |
-| `--no-world` | off | Skip applying Any4D cam2world; save camera frame only |
-| `--save-obj` | off | Also dump per-hand `.obj` to `wilor/obj/` |
-| `--overwrite` | off | Replace `wilor/` |
-
-### Invocations
-
-```bash
-conda activate wilor
-python scripts/60_wilor_hands.py \
-    --scene-dir data/<scene> \
-    --wilor-repo /path/to/WiLoR \
-    --overwrite
-
-# Subrange + fast inference for a long clip
-python scripts/60_wilor_hands.py \
-    --scene-dir data/<scene> \
-    --wilor-repo /path/to/WiLoR \
-    --start-idx 20 --end-idx 80 --fast --overwrite
-
-# Cap to two hands per frame and also export .obj for ad-hoc viewing
-python scripts/60_wilor_hands.py \
-    --scene-dir data/<scene> \
-    --wilor-repo /path/to/WiLoR \
-    --max-hands 2 --save-obj --overwrite
-
-# Force camera-frame output only (no Any4D dependency)
-python scripts/60_wilor_hands.py \
-    --scene-dir data/<scene> \
-    --wilor-repo /path/to/WiLoR \
-    --no-world --overwrite
-```
-
-### Quick sanity check
-
-```bash
-jq '{n: .total_hands,
-     frames: .n_frames_with_hands,
-     world: .world_frame_baked,
-     focal: .focal_length}' \
-    data/<scene>/wilor/config.json
-
-ls data/<scene>/wilor/per_frame/ | head
-python -c "import numpy as np; \
-    d=np.load('data/<scene>/wilor/per_frame/000042.npz'); \
-    print({k: d[k].shape if hasattr(d[k],'shape') else d[k] for k in d.files})"
-```
-
-### Loading in your own code
-
-```python
-import numpy as np
-faces = np.load("data/<scene>/wilor/faces.npy")          # (Nf, 3)
-d = np.load("data/<scene>/wilor/per_frame/000042.npz")
-verts_world = d["verts_world"]   # (n_hands, 778, 3)
-joints = d["joints_world"]       # (n_hands, 21, 3)
-is_right = d["is_right"]         # (n_hands,) bool
-```
-
-(Rerun integration: `rr.log("hands/<frame>/<n>", rr.Mesh3D(vertex_positions=
-verts_world[n], triangle_indices=faces))`.)
-
----
-
-## Stage 60b — rescale legacy WiLoR output to the real MoGe focal
-
-**Env:** any with `numpy`
-**Reads:** `wilor/per_frame/*.npz` (in place), `any4d/moge/intrinsics.npz`
-(real focals), optionally `any4d/cameras.npz` (to re-bake world frame)
-**Writes:** overwrites each per-frame npz in place
-
-A one-off post-fix for `wilor/` folders produced **before** stage 60 learned
-to use the MoGe focal. The old code wrote `cam_t` / `verts` / `joints` with
-WiLoR's *nominal* focal (e.g. `5000/256 × 1920 ≈ 37500` px for a 1920-wide
-clip), so hands landed ~30× too deep. This script rescales camera-frame Z by
-`focal_real / focal_wilor` (projection onto the image is preserved, so the
-hand still aligns), updates `focal_length`, records `focal_length_orig` for
-auditing, and — if `any4d/cameras.npz` exists — re-bakes `verts_world` /
-`joints_world`.
-
-It is **idempotent**: frames already carrying `focal_length_orig` are skipped,
-as are frames with no MoGe focal. Current stage 60 already applies the real
-focal, so you only need this for older runs.
-
-### CLI flags
-
-| flag | default | meaning |
-|---|---|---|
-| `--scene-dir PATH` | — *(required)* | |
-| `--dry-run` | off | Print the per-frame correction without writing |
-
-### Invocations
-
-```bash
-# Preview the correction
-python scripts/60b_rescale_wilor_focal.py --scene-dir data-final/dryer --dry-run
-
-# Apply it
-python scripts/60b_rescale_wilor_focal.py --scene-dir data-final/dryer
-```
-
----
-
-## Stage 60c — HaWoR hand tracking (video-temporal alternative to 60)
+## Stage 60 — HaWoR hand tracking (video-temporal)
 
 **Env:** `hawor` (project memory: torch 2.0.1+cu118, on remote dsailogin) — GPU required
 **Reads:** `frames/*.jpg`, `<hawor-repo>/weights/hawor/checkpoints/{hawor.ckpt,
@@ -1472,15 +1244,14 @@ infiller.pt}`, `<hawor-repo>/_DATA/...` (MANO), optionally
 `any4d/cameras.npz` (world-frame baking) and `any4d/moge/intrinsics.npz` (focal)
 **Writes:** `hawor/{config.json, faces.npy, faces_left.npy, _work/, per_frame/<frame>.npz}`
 
-A drop-in alternative to stage 60. Instead of fitting each frame independently,
 HaWoR runs a full video pipeline — detect/track → per-frame motion estimation →
 masked DROID-SLAM (camera trajectory + metric scale) → a transformer in-filler
 that completes **both** hands across the clip — giving a temporally smooth,
 two-hand (left=0, right=1) trajectory. This stage re-projects those hands into
-the per-frame **camera frame** (RDF, same as MoGe / Any4D / WiLoR) and writes
-the **same npz schema as stage 60**, so `hawor/` is consumable anywhere `wilor/`
-is. If `any4d/cameras.npz` exists it bakes the **identical** cam→world transform
-WiLoR uses, producing `verts_world` / `joints_world` in the Any4D world frame.
+the per-frame **camera frame** (RDF, same as the stage-00 depth + cameras) and
+writes a per-frame npz that the scene-authoring track (52c / 52d / 52e)
+consumes. If `any4d/cameras.npz` exists it bakes the cam→world transform,
+producing `verts_world` / `joints_world` in the shared world frame.
 
 SLAM/tracking intermediates are cached under `hawor/_work/`, so re-deriving the
 npz format (e.g. with different `--start-idx`/`--detected-only`) is cheap;
@@ -1488,8 +1259,8 @@ npz format (e.g. with different `--start-idx`/`--detected-only`) is cheap;
 
 ### Per-frame npz fields
 
-Same as stage 60, **except** `yolo_conf` is replaced by `valid` (HaWoR has no
-detector confidence). Frames with zero hands are omitted.
+HaWoR has no detector confidence, so there is no `yolo_conf` field (a `valid`
+flag marks detected vs. in-filled instead). Frames with zero hands are omitted.
 
 | key | shape | dtype | meaning |
 |---|---|---|---|
@@ -1502,13 +1273,13 @@ detector confidence). Frames with zero hands are omitted.
 | `focal_length` | `()` | float32 | focal used for the clip (single value) |
 | `img_size_wh` | `(2,)` | int32 | image width, height |
 | `frame_idx` | `()` | int32 | source frame index |
-| `verts_world` | `(n_hands, 778, 3)` | float32 | *(if cam pose known)* Any4D world frame |
-| `joints_world` | `(n_hands, 21, 3)` | float32 | *(if cam pose known)* Any4D world frame |
+| `verts_world` | `(n_hands, 778, 3)` | float32 | *(if cam pose known)* world frame |
+| `joints_world` | `(n_hands, 21, 3)` | float32 | *(if cam pose known)* world frame |
 
-`hawor/faces.npy` is standard MANO topology (matches `wilor/faces.npy`). The
-left hand is genuinely posed in 3D (not reflected like WiLoR's), so it shares
-those faces with **reversed winding** — `hawor/faces_left.npy` holds the
-corrected-winding faces for rendering left-hand normals.
+`hawor/faces.npy` is standard MANO topology. The left hand is genuinely posed
+in 3D, so it shares those faces with **reversed winding** —
+`hawor/faces_left.npy` holds the corrected-winding faces for rendering
+left-hand normals.
 
 ### CLI flags
 
@@ -1523,7 +1294,7 @@ corrected-winding faces for rendering left-hand normals.
 | `--start-idx INT` | start of clip | Only *save* frames with index ≥ this (inference still runs on the whole clip — SLAM needs continuity) |
 | `--end-idx INT` | end of clip | Only *save* frames with index < this |
 | `--detected-only` | off | Drop in-filled hands; keep only detected ones |
-| `--no-world` | off | Skip Any4D cam2world; camera frame only |
+| `--no-world` | off | Skip cam→world bake; camera frame only |
 | `--overwrite` | off | Replace `per_frame/`+`faces`+`config` (keeps `_work/` cache) |
 | `--recompute` | off | Also clear `_work/`, forcing track/SLAM to rerun |
 
@@ -1533,21 +1304,21 @@ corrected-winding faces for rendering left-hand normals.
 conda activate hawor
 
 # Default: video-temporal hands for the whole clip, MoGe focal, world-frame baked
-python scripts/60c_hawor_hands.py \
+python scripts/60_hawor_hands.py \
     --scene-dir data/oven \
     --hawor-repo /home/jeremy/research/Articulate4D/HaWoR
 
 # Only detected hands (drop in-filled), forced focal, fresh run
-python scripts/60c_hawor_hands.py \
+python scripts/60_hawor_hands.py \
     --scene-dir data/oven \
     --hawor-repo /home/jeremy/research/Articulate4D/HaWoR \
     --detected-only --img-focal 1500 --overwrite
 ```
 
-> **Note — scale vs. WiLoR:** HaWoR depth comes from its own SLAM metric scale;
-> even with the shared MoGe focal the absolute depth can differ from a WiLoR run
-> of the same clip. Both stages share the camera/world conventions, so they
-> overlay correctly in image space, but don't assume identical metric Z.
+> **Note — metric scale:** HaWoR depth comes from its own SLAM metric scale.
+> With the shared MoGe/stage-00 focal it overlays correctly in image space, but
+> its absolute metric Z is set by SLAM, not by the stage-00 depth — don't assume
+> the two share an identical scale.
 
 ---
 
@@ -1615,17 +1386,19 @@ python scripts/51_replay_with_joints.py --scene-dir data/<scene> --labels laptop
 - **Stage 32**: per-label; skips labels whose `any6d/<label>/` already exists
   unless you pass `--overwrite`. Add `--labels foo` for a subset. Labels with no
   matching mask at the keyframe are skipped with a message.
-- **Stage 40**: requires `--overwrite` to replace an existing `any4d/`. There
-  is no per-label partial mode — the full Any4D forward pass is single-shot.
+- **Stage 00**: requires `--overwrite` to replace an existing `any4d/`. Runs
+  DA3 once over the whole clip; use `--start-idx` / `--end-idx` for a subrange.
+- **Stage 40**: requires `--overwrite` to replace existing per-label tracking.
+  The TrackCraft3R forward pass runs the whole window at once (no per-label
+  partial mode); `--labels` only filters which masks get converted.
 - **Stage 50**: idempotent — re-run with new flags to retune. Updates the
   per-label `joint.json` and scene `joints.json` in place.
 - **Stage 52**: per-label; skips labels whose `aligned/<label>/` already
   exists unless you pass `--overwrite`. Add `--labels foo` for a subset.
-- **Stage 60**: requires `--overwrite` to replace an existing `wilor/`. Use
-  `--start-idx` / `--end-idx` to resume / cover a subrange and merge
-  manually if needed.
-- **Stage 60b**: idempotent — already-corrected frames (carrying
-  `focal_length_orig`) are skipped, so re-running is a no-op.
+- **Stage 60**: replaces `per_frame/` + `faces` + `config` with `--overwrite`
+  (keeps the `_work/` SLAM cache; add `--recompute` to clear it). `--start-idx`
+  / `--end-idx` filter which frames get *saved* (inference runs on the whole
+  clip — SLAM needs continuity).
 - **Stage 52c / 52d**: interactive editors; "Save" overwrites
   `mujoco/` / `rerun/`. 52d auto-loads the existing `transforms.json` on
   startup so you can resume editing.
@@ -1656,9 +1429,9 @@ python scripts/51_replay_with_joints.py --scene-dir data/<scene> --labels laptop
 | Stage 52: refined IoU equals initial IoU | Old code path. Make sure `--chamfer-weight > 0` (default 2.0); pure IoU is piecewise-constant and Nelder-Mead gets stuck. |
 | Stage 52: pose.json gives IoU 0 | Coordinate convention. sam3d's `pose.json` is in PyTorch3D camera frame; stage 52 handles the X-Y flip — if you're rendering elsewhere, mirror manually. |
 | Stage 51: mesh sits near the origin | You're rendering `sam3d/` (unaligned). Run stage 52, then re-run 51 (default `--mesh-source auto` will switch to `aligned/`). |
-| Stage 60: hand sits ~30× too deep | Legacy run with the nominal WiLoR focal. Run `60b_rescale_wilor_focal.py` to rescale in place (current stage 60 already uses the real MoGe focal). |
+| Stage 60: hand depth looks off | HaWoR sets metric Z from its own SLAM scale, not the stage-00 depth. Pass `--img-focal` to force the focal, or `--ignore-moge-focal` to let HaWoR estimate it. |
 | Stage 52c / 52e: STL fails to load in MuJoCo | sam3d meshes exceed MuJoCo's 200000-face STL cap. Keep `--max-faces` below it (default 150000). |
-| Stage 52c / 52d: gradio UI loads but viewer is empty | Confirm both `--label-fixed` and `--label-moving` have a `sam3d/<label>/mesh.glb` (or `cand_NN_*/mesh.glb`), and `wilor/` exists for the hand trajectory. |
+| Stage 52c / 52d: gradio UI loads but viewer is empty | Confirm both `--label-fixed` and `--label-moving` have a `sam3d/<label>/mesh.glb` (or `cand_NN_*/mesh.glb`), and `hawor/` exists for the hand trajectory. |
 | Stage 52e: "no transforms.json" | Save a scene from stage 52d first (writes `rerun/transforms.json`), or point `--transforms` at one. |
 | `pad_frame_names.sh` kills SSH | Use the Python version instead — `pad_frame_names.py`. |
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Stage 52d (Rerun variant of 52c): two sam3d objects + WiLoR hand
+"""Stage 52d (Rerun variant of 52c): two sam3d objects + HaWoR hand
 trajectory + any4d scene flow, visualised in Rerun, edited via the same
 gradio slider UI as 52c.
 
@@ -15,8 +15,8 @@ here — the "drive" slider applies the rotation/translation manually as in
 Reads:
     data/<scene>/sam3d/<label-fixed>/[cand_NN_<kf>/]mesh.glb
     data/<scene>/sam3d/<label-moving>/[cand_NN_<kf>/]mesh.glb
-    data/<scene>/wilor/per_frame/<frame>.npz   (full trajectory)
-    data/<scene>/wilor/faces.npy               (shared MANO topology)
+    data/<scene>/hawor/per_frame/<frame>.npz   (full trajectory)
+    data/<scene>/hawor/faces.npy               (shared MANO topology)
     data/<scene>/any4d/{config.json, pointmap_ref.npy, moge/mask/*}
     data/<scene>/any4d/<label>/{pts3d_ref.npy, scene_flow/<frame>.npy}
     data/<scene>/frames/<frame>.jpg            (frame range + ref RGB)
@@ -126,10 +126,10 @@ def list_scene_frames(scene_dir: Path):
 
 def load_hand_trajectory(scene_dir: Path):
     """Same as 52c. Returns (traj, faces, canon, traj_centroids)."""
-    per_frame_dir = scene_dir / "wilor" / "per_frame"
-    faces_p = scene_dir / "wilor" / "faces.npy"
+    per_frame_dir = scene_dir / "hawor" / "per_frame"
+    faces_p = scene_dir / "hawor" / "faces.npy"
     if not per_frame_dir.is_dir() or not faces_p.is_file():
-        sys.exit(f"error: WiLoR output missing under {scene_dir / 'wilor'}")
+        sys.exit(f"error: HaWoR output missing under {scene_dir / 'hawor'}")
     faces = np.load(faces_p).astype(np.int32)
     traj = {}
     first = {False: None, True: None}
@@ -1154,7 +1154,7 @@ def main():
     frame_indices = list_scene_frames(scene_dir)
     n_with_hands = sum(1 for fi in frame_indices if fi in traj)
     print(f"trajectory: {len(frame_indices)} scene frames, "
-          f"{n_with_hands} with WiLoR hands")
+          f"{n_with_hands} with HaWoR hands")
 
     # Any4D label data (for scene-flow display). any4d_root is needed for
     # the pointcloud too, so always resolve it; only label_data is gated by
