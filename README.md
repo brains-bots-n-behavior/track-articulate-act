@@ -67,7 +67,9 @@ meshes and stage-60 HaWoR hands directly, so they need 30 + 60 but not the
 | 52c | `52c_mujoco_scene.py` | any (mujoco + gradio + trimesh) | interactive MuJoCo editor: two-body joint scene + HaWoR hand replay → `mujoco/scene.xml` |
 | 52d | `52d_rerun_scene.py` | any (rerun + gradio + trimesh) | Rerun version of 52c (+ scene flow / pointcloud) → `rerun/transforms.json` |
 | 52e | `52e_mujoco_animate.py` | any (mujoco + trimesh) | replay a saved 52d scene as a real animated MuJoCo articulation |
+| 52f | `52f_render_mjcf_loop.py` | any (mujoco + numpy + opencv-python) | headless-render any MJCF, driving one joint through a repeating sweep → mp4 |
 | 60 | `60_hawor_hands.py` | `hawor` (torch 2.0.1+cu118) | video-temporal HaWoR hands (track + SLAM + infill) → `hawor/` |
+| 61 | `61_visualize_hawor.py` | any (numpy + opencv-python) | render stage-60 hands over the original RGB video → `hawor/hawor_overlay.mp4` |
 
 ---
 
@@ -869,6 +871,13 @@ Visualizes RGB + ref pointcloud + MoGe depth + per-label scene-flow arrows +
 per-point trajectories. A reusable sanity check that the stage-40 bundle
 contains everything downstream stages need.
 
+It also **exports an mp4** (on by default) of the same per-label point
+tracks projected directly onto the original RGB frames — each track drawn as
+a solid dot at its current position with a semi-transparent fading trail
+behind it, colored the same rainbow-by-initial-X scheme as the Rerun
+polylines. Handy for a quick visual sanity check of tracking quality without
+opening the Rerun viewer (e.g. over SSH on a render-less box).
+
 If you want joint axes and meshes overlaid as well, use **stage 51** instead.
 
 ### CLI flags
@@ -877,16 +886,29 @@ If you want joint axes and meshes overlaid as well, use **stage 51** instead.
 |---|---|---|
 | `--scene-dir PATH` | — *(required)* | |
 | `--no-scene-flow` | off | Skip the scene-flow arrows |
-| `--no-trajectories` | off | Skip 3D point polylines |
+| `--no-trajectories` | off | Skip 3D point polylines (also disables the video export) |
 | `--max-tracks INT` | `200` | Trajectories per label |
 | `--frame-time-step FLOAT` | `0.2` | Seconds per frame on the `stable_time` timeline |
 | `--labels LIST` | all | Subset to replay |
 | `--max-arrows INT` | `500` | Subsample flow arrows per frame per label |
+| `--no-depth` | off | Skip the DA3 depth overlay in Rerun |
+| `--no-video` | off | Skip exporting the point-track mp4 |
+| `--video-out PATH` | `<trackcraft_root>/point_tracks_video.mp4` | Output mp4 path |
+| `--video-fps FLOAT` | `1 / --frame-time-step` | Video framerate |
+| `--video-trail-frames INT` | `8` | Trailing history length (frames) drawn behind each track |
+| `--video-point-radius INT` | `4` | Pixel radius of each track's current-position dot |
+| `--video-line-thickness INT` | `2` | Trail line thickness in pixels |
+| `--video-trail-alpha FLOAT` | `0.6` | Trail opacity, 0-1 |
 
 ### Invocations
 
 ```bash
 python scripts/41_replay_in_rerun.py --scene-dir data/<scene>
+
+# Skip the mp4 export, or customize it
+python scripts/41_replay_in_rerun.py --scene-dir data/<scene> --no-video
+python scripts/41_replay_in_rerun.py --scene-dir data/<scene> \
+    --video-out /tmp/tracks.mp4 --video-trail-frames 15 --video-trail-alpha 0.8
 ```
 
 ---
@@ -1240,6 +1262,65 @@ python scripts/52e_mujoco_animate.py --scene-dir data-final/dryer \
 
 ---
 
+## Stage 52f — headless MJCF render loop (repeating joint sweep → mp4)
+
+**Env:** any with `mujoco` + `numpy` + `opencv-python` (e.g. `any4d`)
+**Reads:** any standalone MJCF `scene.xml` (`mujoco/scene.xml` from 52c, or
+`mujoco_anim/scene.xml` from 52e — any `.xml` MuJoCo can compile works),
+optionally a 52e-style `view.json`
+**Writes:** an mp4 next to the MJCF (default `render_loop.mp4`)
+
+The headless counterpart to 52e: instead of an interactive passive viewer,
+renders offscreen with `mujoco.Renderer` (EGL by default, no display or X
+forwarding needed) straight to a video file. Auto-detects the model's single
+hinge/slide joint (pass `--joint` if there's more than one), auto-loads its
+`<joint limited range=...>` if the MJCF sets one, and drives it through a
+repeating **triangle** or **sine** sweep between `--range-min`/`--range-max`
+for `--n-cycles` — purely kinematically (`mj_forward` after setting `qpos`,
+no `mj_step`/contacts), matching how 52c/52e already animate their live
+views. Camera framing: a named `--camera` from the MJCF, a `--view-file`
+(52e's saved `view.json` format — azimuth/elevation/distance/lookat), manual
+`--azimuth`/`--elevation`/`--distance`/`--lookat`, or MuJoCo's own
+model-extent auto-frame (`mjv_defaultFreeCamera`) if none of those are given.
+
+### CLI flags
+
+| flag | default | meaning |
+|---|---|---|
+| `--mjcf PATH` | — *(required)* | The MJCF to render |
+| `--out PATH` | `<mjcf_dir>/render_loop.mp4` | Output video path |
+| `--joint STR` | auto | Joint name to drive (required if the model has >1 hinge/slide joint) |
+| `--range-min / --range-max FLOAT` | MJCF's own range, else `0`/`80°` (hinge) or `0`/`0.25m` (slide) | Sweep bounds — degrees for hinge, metres for slide |
+| `--motion {triangle,sine}` | `triangle` | Sweep waveform |
+| `--n-cycles FLOAT` | `3.0` | Number of full min→max→min sweeps |
+| `--seconds-per-cycle FLOAT` | `2.0` | Duration of one sweep |
+| `--fps FLOAT` | `30.0` | Render/output framerate |
+| `--width / --height INT` | `1280` / `720` | Render resolution |
+| `--camera STR` | — | Use a named `<camera>` from the MJCF instead of a free camera |
+| `--view-file PATH` | — | 52e-style `view.json` to reuse for the free camera |
+| `--azimuth / --elevation / --distance FLOAT`, `--lookat X Y Z` | MuJoCo auto-frame | Manual free-camera overrides |
+
+### Invocations
+
+```bash
+# Auto joint + range from the MJCF itself
+python scripts/52f_render_mjcf_loop.py --mjcf data/dryer/mujoco/scene.xml
+
+# Explicit hinge sweep, 3 cycles at 30 FPS
+python scripts/52f_render_mjcf_loop.py --mjcf data/dryer/mujoco_anim/scene.xml \
+    --range-min 0 --range-max 75 --n-cycles 3 --fps 30
+
+# Slide joint (metres), sine motion, reuse a 52e-saved camera view
+python scripts/52f_render_mjcf_loop.py --mjcf data/drawer/mujoco/scene.xml \
+    --joint articulation --range-min 0 --range-max 0.25 \
+    --motion sine --view-file data/drawer/mujoco_anim/view.json
+```
+
+Software-rendering fallback if EGL isn't available on the box:
+`MUJOCO_GL=osmesa python scripts/52f_render_mjcf_loop.py ...`
+
+---
+
 ## Stage 60 — HaWoR hand tracking (video-temporal)
 
 **Env:** `hawor` (project memory: torch 2.0.1+cu118, on remote dsailogin) — GPU required
@@ -1323,6 +1404,59 @@ python scripts/60_hawor_hands.py \
 > With the shared MoGe/stage-00 focal it overlays correctly in image space, but
 > its absolute metric Z is set by SLAM, not by the stage-00 depth — don't assume
 > the two share an identical scale.
+
+---
+
+## Stage 61 — render HaWoR hands over the original RGB video
+
+**Env:** any with `numpy` + `opencv-python` (e.g. `any4d`)
+**Reads:** `hawor/{faces.npy, faces_left.npy, per_frame/<frame>.npz}`, `frames/*.jpg`
+**Writes:** `hawor/<out-name>.mp4` (default `hawor_overlay.mp4`)
+
+Pure post-processing over what stage 60 already wrote — no model inference,
+no GPU/pyrender context. For every frame, projects each detected/in-filled
+hand's MANO verts with the exact pinhole model stage 60 used for its own bbox
+(`u = focal * X/Z + W/2`, `v = focal * Y/Z + H/2`, principal point at the
+image center — the verts are already in that frame's own camera frame, so no
+extrinsics are needed), then rasterizes a flat-shaded, depth-sorted
+(painter's-algorithm) triangle mesh directly onto the frame with OpenCV.
+Right hand renders orange, left hand blue; joints get small white markers on
+top. Frames with no hand data pass through unmodified, so the output video
+covers the entire original clip, not just the frames HaWoR found hands in.
+
+With no `--scene-dir`, it batches over every scene under `--data-root`
+(default `data/`) that has a `hawor/per_frame/` folder — matching "render
+HaWoR hands for every scene" in one invocation.
+
+### CLI flags
+
+| flag | default | meaning |
+|---|---|---|
+| `--scene-dir PATH` | — | Single scene. Omit for batch mode |
+| `--data-root PATH` | `data` | Batch-mode root (used only without `--scene-dir`) |
+| `--out-name STR` | `hawor_overlay.mp4` | Output filename, written under `<scene>/hawor/` |
+| `--video-out PATH` | — | Explicit output path (single-scene mode only; overrides `--out-name`) |
+| `--fps FLOAT` | `30.0` | Output video framerate |
+| `--mesh-alpha FLOAT` | `0.85` | Hand-mesh opacity, 0-1 |
+| `--joint-radius INT` | `4` | Joint marker pixel radius |
+| `--detected-only` | off | Skip in-filled hands (`valid=False`), render only HaWoR-detected ones |
+| `--no-mesh` | off | Skip the solid mesh render |
+| `--no-joints` | off | Skip the joint markers |
+| `--overwrite` | off | Replace an existing output video |
+
+### Invocations
+
+```bash
+# One scene -> data/<scene>/hawor/hawor_overlay.mp4
+python scripts/61_visualize_hawor.py --scene-dir data/oven
+
+# Every scene under data/ that has hawor/ output
+python scripts/61_visualize_hawor.py --data-root data --overwrite
+
+# Only detected hands, custom output path
+python scripts/61_visualize_hawor.py --scene-dir data/oven \
+    --detected-only --video-out /tmp/oven_hands.mp4
+```
 
 ---
 
