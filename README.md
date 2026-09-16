@@ -48,3 +48,20 @@ legacy helpers. Model inference requires the relevant GPU dependencies.
 - [`scripts/`](scripts/) — numbered pipeline entry points.
 - [`articulation_estimation/`](articulation_estimation/) — video-based joint fitting and supporting geometry utilities.
 - [`doc/`](doc/) — setup, quickstart, and comprehensive documentation.
+
+## Acknowledgments
+
+We thank the authors and maintainers of the following projects for sharing their
+code, models, and tools. Our framework builds on these modules:
+
+- [SAM 3](https://github.com/facebookresearch/sam3) for segmentation and mask tracking in videos.
+- [SAM 3D Objects](https://github.com/facebookresearch/sam-3d-objects) for single-image 3D object reconstruction.
+- [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3) for depth and camera estimation.
+- [SegviGen](https://github.com/Nelipot-Lee/SegviGen), built on [TRELLIS.2](https://github.com/microsoft/TRELLIS.2), for part segmentation of reconstructed meshes.
+- [TrackCraft3R](https://github.com/cvlab-kaist/TrackCraft3r) for dense 3D point tracking.
+- [HaWoR](https://github.com/ThunderVVV/HaWoR) and [MANO](https://mano.is.tue.mpg.de/) for 3D hand motion and hand mesh reconstruction.
+- [DINOv2](https://github.com/facebookresearch/dinov2) for visual features used in video-based joint fitting.
+- [MuJoCo](https://github.com/google-deepmind/mujoco) for contact-based simulation and hand–object interaction replay.
+
+Please also credit the relevant upstream work when using these modules, and
+refer to each project for its citation, model access, and license information.
