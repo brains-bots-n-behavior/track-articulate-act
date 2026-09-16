@@ -1,48 +1,43 @@
 #!/usr/bin/env python
-"""Stage 00: Depth-Anything-3 depth + camera/world frame (Any4D substitute).
+"""Stage 00: Depth-Anything-3 depth + camera/world frame.
 
-Drop-in replacement for the *depth and camera* portions of the old Any4D
-stage 40 when you don't want to run Any4D (pair it with the TrackCraft3R
-stage 40, `40_trackcraft_flow.py`, for point tracking). Runs DA3 once over the
-clip and writes the same on-disk layout the downstream stages read, so
-stages 52 (align), 60 (HaWoR world-bake), 51/41/33 (replay), and 32 (Any6D)
-consume it without changes.
+Runs DA3 once over the clip and writes the depth/camera products consumed by
+downstream stages. Pair it with the TrackCraft3R stage 08,
+`08_trackcraft_flow.py`, for point tracking. The output schema lets
+mesh alignment, HaWoR world-baking, and legacy replay/Any6D consumers
+read the shared geometry products.
 
 Adapted from TrackCraft3r/scripts/preprocess_da3.py, but instead of dumping
-raw depth/extrinsics/intrinsics NPYs it emits Any4D's exact schema.
+raw depth/extrinsics/intrinsics NPYs it emits the pipeline's shared schema.
 
-Produces (under data/<scene>/any4d/ by default):
+Produces (under data/<scene>/da3/ by default):
     config.json                       # ref_frame, resolutions, source=da3
     cameras.npz                       # cam_quats_xyzw, cam_trans, intrinsics
                                       #   quats are CAMERA-TO-WORLD, XYZW order
-                                      #   (matches quat_xyzw_to_R in stages 52/60)
+                                      #   (matches quat_xyzw_to_R in stages 11/12)
     frame_indices.npy                 # which frame each row of cameras.npz is
     pointmap_ref.npy                  # dense (H, W, 3) ref pointmap, world coords
-    moge/
-        intrinsics.npz                # per-frame K (FULL resolution, pixel units)
-        depth/<frame>.npy             # (H, W) float32 z-depth, full resolution
-        mask/<frame>.png              # binary valid-depth mask (0/255)
+    intrinsics.npz                    # per-frame K (FULL resolution, pixel units)
+    depth/<frame>.npy                 # (H, W) float32 z-depth, full resolution
 
-NOT produced (intrinsic to Any4D — DA3 has no temporal correspondence):
+NOT produced (DA3 has no temporal correspondence):
     <label>/scene_flow, <label>/pts3d_ref, <label>/pixel_ij
-Stage 50 (joint estimation) needs scene flow, so it still requires the real
-Any4D bundle. Stages that only need depth + camera/world (52, 60, 51, 41, 33,
-32) work off this substitute. Trajectory/scene-flow overlays in 41/51 simply
-render nothing (they guard on per-label pts3d_ref.npy).
+Point-track joint estimation needs scene flow from the tracking stage. Stages
+that only need depth + camera/world use these DA3 products directly.
 
 Conventions (verified against consumers):
-  * Depth is z-depth in the RDF camera frame, same as MoGe (52_align_meshes.py
+  * Depth is z-depth in the RDF camera frame, same as MoGe (11_align_meshes.py
     back_project treats it as z). DA3 emits z-depth directly.
   * DA3's extrinsics are WORLD-TO-CAMERA (see preprocess_da3.py header); the
-    pipeline stores CAMERA-TO-WORLD (60_hawor_hands.py builds R_c2w/t_c2w from
+    pipeline stores CAMERA-TO-WORLD (12_hawor_hands.py builds R_c2w/t_c2w from
     cam_quats_xyzw/cam_trans and does p_world = R_c2w @ p_cam + t_c2w). We
     invert here so the stored pose is C2W.
   * The world frame is DA3's own (frame-0 not re-normalized). It is arbitrary
     but self-consistent: every stage bakes into this same frame.
 
 Scale caveat: DA3 depth/pose are not guaranteed to match MoGe's metric scale.
-Stages that reason about a consistent scene scale (52, 51) are fine. Stage 32
-(Any6D) expects *metric* depth — sanity-check the recovered translations if you
+Consumers that reason about a consistent scene scale are fine. Legacy
+Any6D pose estimation expects *metric* depth — sanity-check the recovered translations if you
 feed it a DA3 bundle.
 
 Setup (one-time):
@@ -64,7 +59,6 @@ import sys
 import traceback
 from pathlib import Path
 
-import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -91,12 +85,11 @@ def parse_args():
                    help="Inclusive start frame index (default: 0).")
     p.add_argument("--end-idx", type=int, default=None,
                    help="Exclusive end frame index (default: end of clip).")
-    p.add_argument("--out-name", type=str, default="any4d",
-                   help="Output subfolder under the scene dir (default: any4d, "
-                        "so it is a drop-in for stage 40).")
+    p.add_argument("--out-name", type=str, default="da3",
+                   help="Output subfolder under the scene dir (default: da3).")
     p.add_argument("--no-pointmap-ref", action="store_true",
                    help="Skip writing the dense pointmap_ref.npy (saves disk; "
-                        "41/51 replay need it, 52/60 do not).")
+                        "legacy replay utilities need it; alignment and HaWoR do not).")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--overwrite", action="store_true",
                    help="Replace the existing output folder.")
@@ -106,7 +99,7 @@ def parse_args():
 def R_to_quat_xyzw(R: np.ndarray) -> np.ndarray:
     """Rotation matrix -> quaternion (x, y, z, w), numerically stable.
 
-    Inverse of quat_xyzw_to_R used in stages 52/60."""
+    Inverse of quat_xyzw_to_R used in stages 11/12."""
     R = np.asarray(R, dtype=np.float64)
     m00, m11, m22 = R[0, 0], R[1, 1], R[2, 2]
     tr = m00 + m11 + m22
@@ -249,19 +242,13 @@ def main():
         R_c2w_list.append(R_c2w)
         t_c2w_list.append(t_c2w)
 
-    # --- Write MoGe-style per-frame depth / mask / intrinsics ---
-    moge_root = out_root / "moge"
-    depth_dir = moge_root / "depth"
-    mask_dir = moge_root / "mask"
+    # --- Write per-frame depth and intrinsics directly under da3/ ---
+    depth_dir = out_root / "depth"
     depth_dir.mkdir(parents=True)
-    mask_dir.mkdir(parents=True)
     for t, fi in enumerate(frame_indices):
-        d = depth[t]
-        valid = (np.isfinite(d) & (d > 0)).astype(np.uint8) * 255
-        np.save(depth_dir / f"{fi:06d}.npy", d)
-        cv2.imwrite(str(mask_dir / f"{fi:06d}.png"), valid)
+        np.save(depth_dir / f"{fi:06d}.npy", depth[t])
     np.savez(
-        moge_root / "intrinsics.npz",
+        out_root / "intrinsics.npz",
         frame_indices=np.asarray(frame_indices, dtype=np.int32),
         intrinsics=intr,
     )
@@ -307,7 +294,7 @@ def main():
     print(f"  intrinsics: full res, fx_fy_cx_cy[ref]="
           f"[{intr[r if not args.no_pointmap_ref else 0, 0, 0]:.1f}, "
           f"{intr[0, 1, 1]:.1f}, {intr[0, 0, 2]:.1f}, {intr[0, 1, 2]:.1f}]")
-    print("  NOTE: no scene flow (stage 50 still needs the real Any4D bundle).")
+    print("  NOTE: DA3 does not produce scene flow; run the tracking stage for it.")
     print("done.")
 
 

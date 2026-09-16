@@ -1,0 +1,24 @@
+\paragraph{Articulation estimation.}
+We initialize articulation from the moving part's 3D point trajectories
+and refine it through differentiable rendering. We first re-anchor the
+trajectories to the mesh reference frame and estimate rigid transformations
+at training keyframes using trimmed Kabsch alignment. We robustly fit
+prismatic and revolute joint hypotheses to these transformations:
+\begin{align}
+    \mathcal{T}_{\mathrm{P}}(\mathbf{x};q_t)
+    &= \mathbf{x}+q_t\mathbf{a}, \\
+    \mathcal{T}_{\mathrm{R}}(\mathbf{x};q_t)
+    &= \mathbf{c}+\exp\!\left(q_t[\mathbf{a}]_\times\right)
+       (\mathbf{x}-\mathbf{c}),
+\end{align}
+where $\mathbf{a}$ is the unit joint axis, $\mathbf{c}$ is a point on
+the revolute axis, and $q_t$ is the articulation state. After aligning
+the reference meshes using the static-part masks, we refine each
+initialized joint and its states by minimizing silhouette, boundary,
+and DINOv2 feature discrepancies between rendered and observed images,
+with temporal smoothness regularization and a shared object pose and
+scale correction. The 3D tracks are used only for initialization.
+We select the joint type with the lower median image loss on validation
+frames, optimizing only their states during evaluation. Finally, we fix
+the selected joint model, recover states for all frames, and temporally
+smooth the resulting sequence.

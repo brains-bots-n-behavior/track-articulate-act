@@ -1,23 +1,23 @@
 #!/usr/bin/env python
-"""Stage 05: gradio-based picker for SAM3 click + box refinement prompts.
+"""Stage 01: gradio-based picker for SAM3 click + box refinement prompts.
 
-Runs *before* stage 10 (segmentation): it authors the prompts.json that stage
-10 consumes.
+Runs *before* stage 02 (segmentation): it authors the prompts.json that stage
+02 consumes.
 
-Use this when stage 10's text-only prompts can't separate adjacent parts of
+Use this when stage 02's text-only prompts can't separate adjacent parts of
 an articulated object (e.g. laptop_base vs laptop_up). Run the picker on
 the machine that holds data/, open the printed gradio URL in your local
 browser (VS Code's Remote-SSH auto-forwards the port), click on the frame
 to drop positive / negative points, switch the radio to **box** and click
 two opposite corners for an optional bounding box. Save writes one entry
-into `data/<scene>/prompts.json`, then stage 10 reads it.
+into `data/<scene>/prompts.json`, then stage 02 reads it.
 
 Two kinds of prompt come out of this picker:
-  * CONCEPT prompt  -- fill `text`, no geometry. Stage 10 segments every
+  * CONCEPT prompt  -- fill `text`, no geometry. Stage 02 segments every
     instance of the text concept.
   * INTERACTIVE (PVS) prompt -- leave `text` blank and pick a box + positive
     points (on the part) + negative points (on everything to exclude). Stage
-    10 builds the object purely from this geometry, so the negatives genuinely
+    02 builds the object purely from this geometry, so the negatives genuinely
     carve the part out. This is the reliable way to split sub-parts; a text
     concept re-asserts the whole object during propagation, so negative clicks
     layered on top of it can't remove a sub-part. Keep clicks modest -- the
@@ -26,7 +26,9 @@ Two kinds of prompt come out of this picker:
 The **frame slider** at the top of the UI iterates every JPEG under
 `data/<scene>/frames/`, so each prompt entry can target a different frame
 (`prompts.json[i].frame_index` follows whichever frame was selected when
-that entry was saved).
+that entry was saved). Each entry also records whether its object is
+``static`` or ``moving``. An optional keyframe-candidates textbox accepts a
+comma- or whitespace-separated list of frame indices; it is blank by default.
 
 Reads:
     data/<scene>/frames/*.jpg               (the only required input)
@@ -35,7 +37,7 @@ Writes (append):
     data/<scene>/prompts.json               (or --prompts-json PATH)
 
 Coordinate convention:
-    All coordinates are written as absolute image pixels. Stage 10
+    All coordinates are written as absolute image pixels. Stage 02
     normalizes boxes to xywh in [0, 1] before handing them to SAM3.1; for
     points it sets `rel_coordinates=False` so the pixels go through raw.
 
@@ -43,10 +45,10 @@ Run inside any env with gradio + numpy + opencv-python.
 
 Examples:
     # Default: scan all frames, open on frame 0, save to <scene>/prompts.json
-    python scripts/05_pick_prompts.py --scene-dir data/macbook-all
+    python scripts/01_pick_prompts.py --scene-dir data/macbook-all
 
     # Open the slider already positioned on frame 42, custom output path
-    python scripts/05_pick_prompts.py \\
+    python scripts/01_pick_prompts.py \\
         --scene-dir data/macbook-all \\
         --frame-index 42 \\
         --prompts-json /tmp/my_prompts.json \\
@@ -108,10 +110,44 @@ def load_frame_rgb(frames_dir: Path, frame_idx: int):
 # ---------------------------------------------------------------------------
 
 
-def build_entry(text, label, frame_index, pos_pts, neg_pts, box):
+def parse_keyframe_candidates(value):
+    """Parse optional comma/whitespace-separated frame indices."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return []
+    if isinstance(value, (list, tuple)):
+        raw_values = value
+    else:
+        raw_values = str(value).replace(",", " ").split()
+
+    candidates = []
+    for raw in raw_values:
+        try:
+            frame_idx = int(raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"keyframe candidates must be integers; got {raw!r}"
+            ) from e
+        if frame_idx < 0:
+            raise ValueError(
+                f"keyframe candidates must be non-negative; got {frame_idx}"
+            )
+        if frame_idx not in candidates:
+            candidates.append(frame_idx)
+    return candidates
+
+
+def build_entry(text, label, frame_index, pos_pts, neg_pts, box,
+                motion="static", keyframe_candidates=""):
     text = (text or "").strip()
-    d = {"frame_index": int(frame_index), "label": (label or "").strip()}
-    # `text` is omitted for interactive (PVS) prompts so stage 10 segments the
+    motion = (motion or "").strip().lower()
+    if motion not in {"static", "moving"}:
+        raise ValueError("motion must be either 'static' or 'moving'")
+    d = {
+        "frame_index": int(frame_index),
+        "label": (label or "").strip(),
+        "motion": motion,
+    }
+    # `text` is omitted for interactive (PVS) prompts so stage 02 segments the
     # part purely from the geometry instead of the (whole-object) text concept.
     if text:
         d = {"text": text, **d}
@@ -123,6 +159,9 @@ def build_entry(text, label, frame_index, pos_pts, neg_pts, box):
         x1, y1, x2, y2 = box
         d["box"] = [int(min(x1, x2)), int(min(y1, y2)),
                     int(max(x1, x2)), int(max(y1, y2))]
+    candidates = parse_keyframe_candidates(keyframe_candidates)
+    if candidates:
+        d["keyframe_candidates"] = candidates
     return d
 
 
@@ -159,7 +198,7 @@ def append_entry(prompts_path: Path, entry: dict, replace_same_label: bool):
     prompts_path.write_text(json.dumps(out, indent=2))
     return (f"**OK**: {verb} `{entry['label']}` (frame {entry['frame_index']:06d}) "
             f"→ `{prompts_path}` ({len(entries)} prompt(s) total). "
-            f"Run stage 10 with `--prompts-json {prompts_path}`.")
+            f"Run stage 02 with `--prompts-json {prompts_path}`.")
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +283,14 @@ def main():
             "mode and click two opposite corners for a blue bbox.  \n"
             "**To separate a sub-part** (e.g. a fridge door from its body), "
             "leave `text` **blank** and use a box + positive points on the "
-            "part and negative points on the rest — stage 10 then segments "
+            "part and negative points on the rest — stage 02 then segments "
             "it purely from your clicks (an interactive/PVS prompt), so the "
             "negatives actually carve. Keep it to **≤8 positive and ≤8 "
             "negative** (the tracker drops points beyond 16).  \n"
             "For a whole object, just fill `text` (a concept prompt). Always "
-            "fill `label`, then **Append to prompts.json**.  \n"
+            "fill `label`, choose whether the object is **static** or "
+            "**moving**, and optionally enter keyframe candidates, then "
+            "**Append to prompts.json**.  \n"
             f"_Output:_ `{prompts_path}`  •  "
             + (f"existing labels: `{', '.join(existing_labels)}`"
                if existing_labels else "no existing prompts.")
@@ -295,6 +336,14 @@ def main():
                 label_in = gr.Textbox(
                     "", label="label (filesystem-safe; no spaces or `/`)"
                 )
+                motion_in = gr.Radio(
+                    ["static", "moving"], value="static",
+                    label="object motion"
+                )
+                candidates_in = gr.Textbox(
+                    "", label="keyframe candidates (optional; comma/space separated)",
+                    placeholder="e.g. 42, 87, 103"
+                )
                 with gr.Row():
                     undo_btn = gr.Button("Undo last", variant="secondary")
                     clear_pts_btn = gr.Button("Clear points",
@@ -315,7 +364,8 @@ def main():
 
         # ---- helpers used by callbacks ----
 
-        def render(base, pos, neg, box, pending, text, label, frame_idx):
+        def render(base, pos, neg, box, pending, text, label, motion,
+                   candidates, frame_idx):
             overlay = draw_overlay(base, pos, neg, box, pending)
             status_lines = [
                 f"frame `{frame_idx:06d}`  •  "
@@ -328,7 +378,11 @@ def main():
                     f"_pending box corner_: `{pending}` — click once more "
                     f"to finalize"
                 )
-            entry = build_entry(text, label, frame_idx, pos, neg, box)
+            try:
+                entry = build_entry(text, label, frame_idx, pos, neg, box,
+                                    motion, candidates)
+            except ValueError as e:
+                entry = {"error": str(e)}
             return (overlay,
                     "  \n".join(status_lines),
                     json.dumps(entry, indent=2))
@@ -339,7 +393,7 @@ def main():
 
         # ---- callbacks ----
 
-        def on_frame_change(slot, text, label):
+        def on_frame_change(slot, text, label, motion, candidates):
             """Switch to a new frame: reload the image, reset all picks."""
             slot = int(round(float(slot)))
             slot = max(0, min(n_slots - 1, slot))
@@ -350,21 +404,24 @@ def main():
                 # file exists at scan time. Fall back to a blank notice.
                 return (gr.update(), gr.update(), gr.update(), gr.update(),
                         gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update())
+                        gr.update(), gr.update())
             overlay, status, j = render(new_image, [], [], None, None,
-                                         text, label, fi)
+                                         text, label, motion, candidates, fi)
             return (new_image, fi, overlay, [], [], None, None,
                     status, j, frame_label_md(slot, fi))
 
-        def on_prev(slot, text, label):
+        def on_prev(slot, text, label, motion, candidates):
             new_slot = max(0, int(round(float(slot))) - 1)
-            return (new_slot, *on_frame_change(new_slot, text, label))
+            return (new_slot, *on_frame_change(
+                new_slot, text, label, motion, candidates))
 
-        def on_next(slot, text, label):
+        def on_next(slot, text, label, motion, candidates):
             new_slot = min(n_slots - 1, int(round(float(slot))) + 1)
-            return (new_slot, *on_frame_change(new_slot, text, label))
+            return (new_slot, *on_frame_change(
+                new_slot, text, label, motion, candidates))
 
-        def on_click(mode_v, pos, neg, box, pending, text, label,
+        def on_click(mode_v, pos, neg, box, pending, text, label, motion,
+                     candidates,
                      base_image, cur_fi, evt: gr.SelectData):
             x, y = int(evt.index[0]), int(evt.index[1])
             h, w = base_image.shape[:2]
@@ -382,10 +439,11 @@ def main():
                     box = (min(x, px), min(y, py), max(x, px), max(y, py))
                     pending = None
             overlay, status, j = render(base_image, pos, neg, box, pending,
-                                         text, label, cur_fi)
+                                         text, label, motion, candidates, cur_fi)
             return overlay, pos, neg, box, pending, status, j
 
-        def on_undo(mode_v, pos, neg, box, pending, text, label,
+        def on_undo(mode_v, pos, neg, box, pending, text, label, motion,
+                    candidates,
                     base_image, cur_fi):
             if mode_v == "positive point" and pos:
                 pos = pos[:-1]
@@ -397,31 +455,34 @@ def main():
                 else:
                     box = None
             overlay, status, j = render(base_image, pos, neg, box, pending,
-                                         text, label, cur_fi)
+                                         text, label, motion, candidates, cur_fi)
             return overlay, pos, neg, box, pending, status, j
 
-        def on_clear_pts(box, pending, text, label, base_image, cur_fi):
+        def on_clear_pts(box, pending, text, label, motion, candidates,
+                         base_image, cur_fi):
             overlay, status, j = render(base_image, [], [], box, pending,
-                                         text, label, cur_fi)
+                                         text, label, motion, candidates, cur_fi)
             return overlay, [], [], status, j
 
-        def on_clear_box(pos, neg, text, label, base_image, cur_fi):
+        def on_clear_box(pos, neg, text, label, motion, candidates,
+                         base_image, cur_fi):
             overlay, status, j = render(base_image, pos, neg, None, None,
-                                         text, label, cur_fi)
+                                         text, label, motion, candidates, cur_fi)
             return overlay, None, None, status, j
 
-        def on_clear_all(text, label, base_image, cur_fi):
+        def on_clear_all(text, label, motion, candidates, base_image, cur_fi):
             overlay, status, j = render(base_image, [], [], None, None,
-                                         text, label, cur_fi)
+                                         text, label, motion, candidates, cur_fi)
             return overlay, [], [], None, None, status, j
 
-        def on_text_label_change(text, label, pos, neg, box, pending,
-                                 base_image, cur_fi):
+        def on_entry_fields_change(text, label, motion, candidates, pos, neg,
+                                   box, pending, base_image, cur_fi):
             _, _, j = render(base_image, pos, neg, box, pending,
-                             text, label, cur_fi)
+                             text, label, motion, candidates, cur_fi)
             return j
 
-        def on_append(text, label, pos, neg, box, replace_v, cur_fi):
+        def on_append(text, label, motion, candidates, pos, neg, box,
+                      replace_v, cur_fi):
             text = (text or "").strip()
             label = (label or "").strip()
             has_geom = bool(pos or neg or box is not None)
@@ -433,7 +494,16 @@ def main():
             if not text and not has_geom:
                 return ("**ERROR**: provide `text`, or pick points / a box for "
                         "an interactive (PVS) part prompt.")
-            entry = build_entry(text, label, cur_fi, pos, neg, box)
+            try:
+                entry = build_entry(text, label, cur_fi, pos, neg, box,
+                                    motion, candidates)
+            except ValueError as e:
+                return f"**ERROR**: {e}."
+            unavailable = [fi for fi in entry.get("keyframe_candidates", [])
+                           if fi not in frame_indices]
+            if unavailable:
+                return ("**ERROR**: keyframe candidate(s) not present in "
+                        f"`frames/`: {unavailable}.")
             msg = append_entry(prompts_path, entry, replace_v)
             # Warn about the tracker's 16-point cap (box counts as 2 points).
             n_geom = len(pos) + len(neg) + (2 if box is not None else 0)
@@ -443,7 +513,7 @@ def main():
                         "are dropped). Trim to ≤8 positive and ≤8 negative."
                         .format(n_geom))
             if has_geom and not text:
-                msg += ("  \n_Interactive prompt: stage 10 segments this part "
+                msg += ("  \n_Interactive prompt: stage 02 segments this part "
                         "purely from the geometry (no text concept)._")
             return msg
 
@@ -453,14 +523,14 @@ def main():
         # for every intermediate value while scrubbing).
         frame_slider.release(
             on_frame_change,
-            inputs=[frame_slider, text_in, label_in],
+            inputs=[frame_slider, text_in, label_in, motion_in, candidates_in],
             outputs=[cur_image_state, cur_frame_state, img_view,
                      pos_state, neg_state, box_state, pending_state,
                      status_md, json_preview, frame_md],
         )
         prev_btn.click(
             on_prev,
-            inputs=[frame_slider, text_in, label_in],
+            inputs=[frame_slider, text_in, label_in, motion_in, candidates_in],
             outputs=[frame_slider,
                      cur_image_state, cur_frame_state, img_view,
                      pos_state, neg_state, box_state, pending_state,
@@ -468,7 +538,7 @@ def main():
         )
         next_btn.click(
             on_next,
-            inputs=[frame_slider, text_in, label_in],
+            inputs=[frame_slider, text_in, label_in, motion_in, candidates_in],
             outputs=[frame_slider,
                      cur_image_state, cur_frame_state, img_view,
                      pos_state, neg_state, box_state, pending_state,
@@ -478,58 +548,80 @@ def main():
         img_view.select(
             on_click,
             inputs=[mode, pos_state, neg_state, box_state, pending_state,
-                    text_in, label_in, cur_image_state, cur_frame_state],
+                    text_in, label_in, motion_in, candidates_in,
+                    cur_image_state, cur_frame_state],
             outputs=[img_view, pos_state, neg_state, box_state, pending_state,
                      status_md, json_preview],
         )
         undo_btn.click(
             on_undo,
             inputs=[mode, pos_state, neg_state, box_state, pending_state,
-                    text_in, label_in, cur_image_state, cur_frame_state],
+                    text_in, label_in, motion_in, candidates_in,
+                    cur_image_state, cur_frame_state],
             outputs=[img_view, pos_state, neg_state, box_state, pending_state,
                      status_md, json_preview],
         )
         clear_pts_btn.click(
             on_clear_pts,
             inputs=[box_state, pending_state, text_in, label_in,
+                    motion_in, candidates_in,
                     cur_image_state, cur_frame_state],
             outputs=[img_view, pos_state, neg_state, status_md, json_preview],
         )
         clear_box_btn.click(
             on_clear_box,
             inputs=[pos_state, neg_state, text_in, label_in,
+                    motion_in, candidates_in,
                     cur_image_state, cur_frame_state],
             outputs=[img_view, box_state, pending_state, status_md,
                      json_preview],
         )
         clear_all_btn.click(
             on_clear_all,
-            inputs=[text_in, label_in, cur_image_state, cur_frame_state],
+            inputs=[text_in, label_in, motion_in, candidates_in,
+                    cur_image_state, cur_frame_state],
             outputs=[img_view, pos_state, neg_state, box_state, pending_state,
                      status_md, json_preview],
         )
         text_in.change(
-            on_text_label_change,
-            inputs=[text_in, label_in, pos_state, neg_state, box_state,
-                    pending_state, cur_image_state, cur_frame_state],
+            on_entry_fields_change,
+            inputs=[text_in, label_in, motion_in, candidates_in, pos_state,
+                    neg_state, box_state, pending_state, cur_image_state,
+                    cur_frame_state],
             outputs=[json_preview],
         )
         label_in.change(
-            on_text_label_change,
-            inputs=[text_in, label_in, pos_state, neg_state, box_state,
-                    pending_state, cur_image_state, cur_frame_state],
+            on_entry_fields_change,
+            inputs=[text_in, label_in, motion_in, candidates_in, pos_state,
+                    neg_state, box_state, pending_state, cur_image_state,
+                    cur_frame_state],
+            outputs=[json_preview],
+        )
+        motion_in.change(
+            on_entry_fields_change,
+            inputs=[text_in, label_in, motion_in, candidates_in, pos_state,
+                    neg_state, box_state, pending_state, cur_image_state,
+                    cur_frame_state],
+            outputs=[json_preview],
+        )
+        candidates_in.change(
+            on_entry_fields_change,
+            inputs=[text_in, label_in, motion_in, candidates_in, pos_state,
+                    neg_state, box_state, pending_state, cur_image_state,
+                    cur_frame_state],
             outputs=[json_preview],
         )
         append_btn.click(
             on_append,
-            inputs=[text_in, label_in, pos_state, neg_state, box_state,
-                    replace_cb, cur_frame_state],
+            inputs=[text_in, label_in, motion_in, candidates_in, pos_state,
+                    neg_state, box_state, replace_cb, cur_frame_state],
             outputs=[save_status],
         )
 
         # initial JSON preview
         def on_load(base_image, cur_fi):
-            _, _, j = render(base_image, [], [], None, None, "", "", cur_fi)
+            _, _, j = render(base_image, [], [], None, None, "", "", "static",
+                             "", cur_fi)
             return j
         demo.load(on_load,
                   inputs=[cur_image_state, cur_frame_state],

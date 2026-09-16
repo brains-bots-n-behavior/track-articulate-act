@@ -1,7 +1,13 @@
 #!/usr/bin/env python
-"""Stage 50: per-label joint type + parameter estimation.
+"""Stage 09: legacy numerical helpers retained for import compatibility.
 
-For each label in data/<scene>/any4d/<label>/, treat the masked points as
+The Stage 09 command-line path now delegates to ``articulation_estimation``
+before any of the historical code below executes. The active implementation
+is video-driven (DINOv2 + masks + differentiable mesh rendering); optional
+flags add robust DA3 depth and an Any6D pose/scale initializer. It does not use
+the scene-flow method documented below.
+
+For each label in data/<scene>/trackcraft/<label>/, treat the masked points as
 samples on a single rigid movable part of an articulated object and fit a
 motion model. Three methods are available:
 
@@ -27,18 +33,22 @@ motion model. Three methods are available:
         whenever the scene flow encodes a finite rotation.
 
 Reads:
-    data/<scene>/any4d/<label>/pts3d_ref.npy
-    data/<scene>/any4d/<label>/scene_flow/<frame>.npy
+    data/<scene>/trackcraft/<label>/pts3d_ref.npy
+    data/<scene>/trackcraft/<label>/scene_flow/<frame>.npy
 
 Writes:
-    data/<scene>/any4d/joints.json                (summary, all labels)
-    data/<scene>/any4d/<label>/joint.json         (per label)
+    data/<scene>/joints/joints.json                (summary, all labels)
+    data/<scene>/joints/<label>/joint.json         (per label)
 
 Examples:
-    python scripts/50_estimate_joint.py --scene-dir macbook-all
-    python scripts/50_estimate_joint.py --scene-dir macbook-all \\
+    python scripts/09_estimate_joint.py --scene-dir macbook-all
+    python scripts/09_estimate_joint.py --scene-dir macbook-all \
+        --pose-initializer sam3d
+    python scripts/09_estimate_joint.py --scene-dir macbook-all \
+        --use-depth --use-any6d-pose
+    python scripts/09_estimate_joint.py --scene-dir macbook-all \\
         --labels laptop_up --theta-min 5 --theta-max 60
-    python scripts/50_estimate_joint.py --scene-dir macbook-all \\
+    python scripts/09_estimate_joint.py --scene-dir macbook-all \\
         --method linear --per-frame --min-flow 0.005
 """
 
@@ -50,14 +60,27 @@ from pathlib import Path
 import numpy as np
 
 
+# Stage 09 was replaced by the video-driven implementation in the package at
+# the repository root.  Keep the historical helpers below importable for old
+# notebooks, but make every command-line invocation use the new pipeline.
+if __name__ == "__main__":
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from articulation_estimation.cli import main as video_main
+
+    video_main()
+    raise SystemExit(0)
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter, description=__doc__
     )
     p.add_argument("--scene-dir", type=Path, required=True,
-                   help="Path to data/<scene>/ (must contain any4d/<label>/...)")
+                   help="Path to data/<scene>/ (must contain trackcraft/<label>/...)")
     p.add_argument("--labels", nargs="*", default=None,
-                   help="Only process these labels (default: all under any4d/)")
+                   help="Only process these labels (default: all under trackcraft/)")
     p.add_argument("--method", choices=["procrustes", "linear"], default="procrustes",
                    help="Fit strategy. procrustes (default) handles finite "
                         "rotations exactly; linear is the slide algorithm.")
@@ -752,16 +775,16 @@ def load_label_data(label_dir: Path):
 def main():
     args = parse_args()
     scene_dir = args.scene_dir.resolve()
-    any4d_root = scene_dir / "any4d"
-    if not any4d_root.is_dir():
-        sys.exit(f"error: {any4d_root} does not exist (run stage 40 first)")
+    trackcraft_root = scene_dir / "trackcraft"
+    if not trackcraft_root.is_dir():
+        sys.exit(f"error: {trackcraft_root} does not exist (run stage 08 first)")
 
     # Discover labels
-    all_label_dirs = [d for d in any4d_root.iterdir()
+    all_label_dirs = [d for d in trackcraft_root.iterdir()
                       if d.is_dir() and d.name != "moge"
                       and (d / "pts3d_ref.npy").is_file()]
     if not all_label_dirs:
-        sys.exit(f"error: no labels with pts3d_ref.npy under {any4d_root}")
+        sys.exit(f"error: no labels with pts3d_ref.npy under {trackcraft_root}")
     labels = sorted([d.name for d in all_label_dirs])
     if args.labels:
         unknown = [l for l in args.labels if l not in labels]
@@ -780,7 +803,7 @@ def main():
 
     # ref_frame is needed for refinement window selection
     ref_frame = None
-    cfg_path = any4d_root / "config.json"
+    cfg_path = trackcraft_root / "config.json"
     if cfg_path.is_file():
         with open(cfg_path) as f:
             ref_frame = json.load(f).get("ref_frame")
@@ -796,7 +819,7 @@ def main():
     summary = {}
 
     for label in labels:
-        label_dir = any4d_root / label
+        label_dir = trackcraft_root / label
         loaded, err = load_label_data(label_dir)
         if err:
             print(f"[{label}] SKIP: {err}")
@@ -889,8 +912,10 @@ def main():
 
         # Per-label sidecar
         if not args.dry_run:
+            label_output = scene_dir / "joints" / label
+            label_output.mkdir(parents=True, exist_ok=True)
             sidecar = {k: v for k, v in result.items() if k != "per_frame_summary"}
-            with open(label_dir / "joint.json", "w") as fp:
+            with open(label_output / "joint.json", "w") as fp:
                 json.dump(sidecar, fp, indent=2)
 
         summary[label] = result
@@ -898,7 +923,9 @@ def main():
     if args.dry_run:
         print("--dry-run: skipping write")
     else:
-        out = any4d_root / "joints.json"
+        output_root = scene_dir / "joints"
+        output_root.mkdir(parents=True, exist_ok=True)
+        out = output_root / "joints.json"
         # Trim per_frame_summary out of the scene summary to keep it compact;
         # the full per-frame log stays in <label>/joint.json only if requested.
         compact = {}

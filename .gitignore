@@ -1,2 +1,9 @@
 **pycache**
 tmp/
+.DS_Store
+graft/
+
+# AI cache files
+*.cache
+.claude/
+.agent/

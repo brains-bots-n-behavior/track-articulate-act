@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Stage 52: align sam3d meshes to each label's keyframe image + mask.
+"""Stage 11: align sam3d meshes to each label's keyframe image + mask.
 
 Pipeline per label, using the keyframe recorded in keyframe.txt:
   1. Load mesh.glb (sam3d output, canonical frame).
@@ -14,7 +14,7 @@ Pipeline per label, using the keyframe recorded in keyframe.txt:
      Nelder-Mead with cost = (1 - IoU(rendered_silhouette, mask))
                             + lambda_icp * mean(dist to MoGe pointmap).
   5. Bake camera-to-world transform for the keyframe (from any4d/cameras.npz)
-     so the saved mesh is directly in Any4D's world frame for stage 51 to
+     so the saved mesh is directly in Any4D's world frame for downstream viewers to
      render alongside the pointcloud / scene-flow / joint axes.
 
 Inputs:
@@ -94,7 +94,7 @@ def find_mesh_dir(label_dir: Path, candidate_idx: int):
     """Return (mesh_path, pose_path, keyframe) for a label.
 
     Order of attempts:
-        1. label_dir/mesh.glb   (single candidate written by stage 30)
+        1. label_dir/mesh.glb   (single candidate written by stage 03)
         2. label_dir/cand_<candidate_idx:02d>_*/mesh.glb
         3. first cand_*/mesh.glb
     """

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Stage 63: test whether HaWoR hand contact can drive an estimated joint.
+"""Stage 14: test whether HaWoR hand contact can drive an estimated joint.
 
 This viewer loads the registered object meshes and ``simple_joint/joints.json``
-in the same Stage-31 reference coordinate frame used by Stages 61 and 62.  The
+in the same Stage-06 reference coordinate frame used by the legacy rendering utilities.  The
 selected first/last moving mesh is attached to the estimated MuJoCo hinge or
 slide joint, but its joint trajectory is *not* prescribed.  There are no
 actuators and gravity is zero.  The moving part can therefore be driven only by
@@ -30,20 +30,20 @@ drive or block the moving part.
 
 Examples::
 
-    python scripts/63_mujoco_retarget.py --scene-dir data/trashbin --play
-    python scripts/63_mujoco_retarget.py --scene-dir data/dryer \
+    python scripts/14_mujoco_retarget.py --scene-dir data/trashbin --play
+    python scripts/14_mujoco_retarget.py --scene-dir data/dryer \
         --label dryer_door --play
-    python scripts/63_mujoco_retarget.py --scene-dir data/trashbin --dry-run
-    python scripts/63_mujoco_retarget.py --scene-dir data/trashbin --export-video
+    python scripts/14_mujoco_retarget.py --scene-dir data/trashbin --dry-run
+    python scripts/14_mujoco_retarget.py --scene-dir data/trashbin --export-video
 
 ``--export-video`` skips the viewer entirely and renders the same replay
 offscreen through the DA3 camera, placing the MuJoCo camera from
 ``da3/cameras.npz`` and reproducing the full ``da3/intrinsics.npz`` pinhole --
 unequal focal lengths, skew and an off-center principal point included -- by
-rendering an overscanned centered image and remapping it, reusing Stage 61's
+rendering an overscanned centered image and remapping it, reusing the legacy render helper's
 ``camera_render_spec``.  It additionally needs OpenCV and Pillow.  The
 finished MP4 is also mirrored to ``<scene>/render_all/mujoco-retarget.mp4``
-alongside the other Stage-6x renders; pass ``--no-render-all-copy`` to skip
+alongside the other scene renders; pass ``--no-render-all-copy`` to skip
 that copy.
 
 In the viewer, Space pauses/resumes and R resets the object and hand replay.
@@ -101,13 +101,13 @@ DA3_CAMERA_NAME = "da3_camera"
 
 
 def _load_stage61():
-    """Load Stage 61 without importing Viser or OpenCV."""
+    """Load legacy 61_render_all.py without importing Viser or OpenCV."""
     path = SCRIPT_DIR / "61_render_all.py"
     spec = importlib.util.spec_from_file_location(
         "articulate4d_stage61_for_mujoco", path
     )
     if spec is None or spec.loader is None:
-        raise ImportError(f"could not load Stage 61 from {path}")
+        raise ImportError(f"could not load legacy render helper from {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -333,7 +333,7 @@ def parse_args(argv=None):
         "--range-min",
         type=float,
         help=(
-            "Joint offset lower limit: degrees for hinge, Stage-31 units "
+            "Joint offset lower limit: degrees for hinge, Stage-06 units "
             "for slide; only valid with one --label"
         ),
     )
@@ -341,7 +341,7 @@ def parse_args(argv=None):
         "--range-max",
         type=float,
         help=(
-            "Joint offset upper limit: degrees for hinge, Stage-31 units "
+            "Joint offset upper limit: degrees for hinge, Stage-06 units "
             "for slide; only valid with one --label"
         ),
     )
@@ -896,7 +896,7 @@ def build_model_bundle(
         offscreen = f' offwidth="{offscreen_w}" offheight="{offscreen_h}"'
 
     timestep = 1.0 / args.physics_hz
-    xml = f"""<mujoco model="stage63_hawor_contact_retarget">
+    xml = f"""<mujoco model="stage14_hawor_contact_retarget">
   <compiler angle="radian" autolimits="true" balanceinertia="true"/>
   <option timestep="{timestep:.17g}" gravity="0 0 0"
           integrator="implicitfast" solver="Newton" cone="elliptic"
@@ -1027,7 +1027,7 @@ def joint_rate_from_velocity(
 
     Prismatic joints take the linear speed along the axis.  Revolute joints
     take the signed orbital angular velocity about the axis, which matches the
-    sign convention of Stage 61's ``relative_interval_velocity``.
+    sign convention of the legacy render helper's ``relative_interval_velocity``.
     """
     axis = np.asarray(record["axis_direction"], dtype=np.float64).reshape(3)
     axis = axis / np.linalg.norm(axis)
@@ -1266,7 +1266,7 @@ class ReplayDriver:
             "rate": {label: 0.0 for label in prepared.joints},
             "hold": {label: 0.0 for label in prepared.joints},
         }
-        # Mirrors Stage 61's relative radius floor for on-axis contacts.
+        # Mirrors the legacy render helper's relative radius floor for on-axis contacts.
         self.radius_floors = {
             label: 1e-4
             * max(float(prepared.meshes.moving[label][args.mesh_frame].diagonal), 1e-4)
@@ -1524,7 +1524,7 @@ def _offscreen_plan(cameras, frame_ids, image_hw, max_side):
 
 
 def _canvas_camera(spec, canvas_hw) -> tuple[float, np.ndarray, np.ndarray]:
-    """Retarget one Stage-61 render spec onto a fixed, larger canvas.
+    """Retarget one legacy render specification onto a fixed, larger canvas.
 
     ``camera_render_spec`` centers its remap on its own canvas at one focal
     length.  Holding that focal length while enlarging the canvas changes the
@@ -1711,7 +1711,7 @@ def export_video(prepared: PreparedScene, args) -> Path:
 
     metadata = {
         "version": 1,
-        "stage": "63_mujoco_retarget",
+        "stage": "14_mujoco_retarget",
         "method": "mujoco_offscreen_da3_full_intrinsics",
         "video": str(output_path),
         "render_all_copy": None if copy_path is None else str(copy_path),
@@ -1725,7 +1725,7 @@ def export_video(prepared: PreparedScene, args) -> Path:
         "camera_pose_source": "da3/cameras.npz (camera-to-world, XYZW)",
         "intrinsics_source": "da3/intrinsics.npz",
         "camera_convention": "DA3 RDF converted to MuJoCo -Z forward / +Y up",
-        "frame_mapping": "direct numeric frame index (Stage 31/60/60a convention)",
+        "frame_mapping": "direct numeric frame index (Stage 06/12/13 convention)",
         "native_camera_frames": native_frames,
         "interpolated_or_held_camera_frames": inferred_frames,
         "drive_mode": args.drive_mode,

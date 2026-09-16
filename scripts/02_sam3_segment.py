@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Stage 10: SAM3 video segmentation + tracking.
+"""Stage 02: SAM3 video segmentation + tracking.
 
 Consumes:
     data/<scene>/frames/*.jpg              (canonical RGB frames from stage 00)
@@ -19,11 +19,11 @@ responsibility).
 Run inside the `sam3` conda env.
 
 Example:
-    python 10_sam3_segment.py \\
+    python 02_sam3_segment.py \\
         --scene-dir data/kitchen_pour_01 \\
         --prompt "blue mug"
 
-    python 10_sam3_segment.py \\
+    python 02_sam3_segment.py \\
         --scene-dir data/kitchen_pour_01 \\
         --prompts-json prompts.json \\
         --version sam3.1
@@ -32,23 +32,32 @@ prompts.json schema:
     {
       "prompts": [
         # --- Concept (text) prompts: segment ALL instances of a concept ---
-        {"text": "person",   "frame_index": 0, "label": "person"},
-        {"text": "blue mug", "frame_index": 0, "label": "mug"},
+        {"text": "person",   "frame_index": 0, "label": "person",
+         "motion": "moving"},
+        {"text": "blue mug", "frame_index": 0, "label": "mug",
+         "motion": "static"},
 
         # --- Interactive (PVS) prompts: segment ONE part from geometry ---
         # Use these to separate adjacent parts of an articulated object,
         # where a text concept grabs the whole thing (e.g. a fridge door vs
         # its body). Provide a box and/or points and omit `text`. Coordinates
-        # are absolute image pixels; author them with 05_pick_prompts.py.
+        # are absolute image pixels; author them with 01_pick_prompts.py.
         {
           "frame_index": 0,
           "label": "lid",
+          "motion": "moving",
           "box": [x1, y1, x2, y2],            # xyxy, optional
           "positive_points": [[x, y], ...],   # kept inside the part
           "negative_points": [[x, y], ...]    # excluded from the part
         }
       ]
     }
+
+After all prompts have been saved, the union of the masks labelled ``moving``
+is subtracted from every mask labelled ``static`` on each frame. This gives
+moving objects ownership of static/moving overlap pixels. Overlaps between two
+static masks or two moving masks are left unchanged. Missing ``motion`` values
+default to ``static``.
 
 A prompt is INTERACTIVE (PVS) when it carries any of box / positive_points /
 negative_points; otherwise it is a CONCEPT (text) prompt. Interactive prompts
@@ -133,6 +142,17 @@ def load_prompts(args):
 
     for p in prompts:
         p.setdefault("frame_index", 0)
+        motion = (p.get("motion") or "static").strip().lower()
+        if motion not in {"static", "moving"}:
+            sys.exit(f"error: prompt motion must be 'static' or 'moving': {p}")
+        p["motion"] = motion
+        candidates = p.get("keyframe_candidates", [])
+        if (not isinstance(candidates, list)
+                or any(not isinstance(fi, int) or isinstance(fi, bool) or fi < 0
+                       for fi in candidates)):
+            sys.exit("error: prompt 'keyframe_candidates' must be a list of "
+                     f"non-negative integers: {p}")
+        p["keyframe_candidates"] = list(dict.fromkeys(candidates))
         has_geom = bool(p.get("positive_points") or p.get("negative_points")
                         or p.get("box"))
         text = (p.get("text") or "").strip()
@@ -349,6 +369,7 @@ def save_masks_and_track(outputs_per_frame, prompt, orig_hw, frame_stems,
             "prompt": prompt.get("text") or "",
             "mode": "interactive" if is_interactive else "concept",
             "label": base_label,
+            "motion": prompt.get("motion", "static"),
             "color": list((COLORS[color_idx % len(COLORS)] * 255).astype(int).tolist()),
             "first_frame": None,
             "last_frame": None,
@@ -390,11 +411,82 @@ def save_masks_and_track(outputs_per_frame, prompt, orig_hw, frame_stems,
                 mask_u8 = np.zeros((H, W), dtype=np.uint8)
             cv2.imwrite(str(mask_path), mask_u8)
 
-    # 6. Add keyframe placeholder for stage 20
+    # 6. Preserve user-entered candidates; these feed reconstruction in stage 03.
     for name in stats:
-        stats[name]["keyframe"] = None
+        candidates = prompt.get("keyframe_candidates", [])
+        stats[name]["keyframe_candidates"] = candidates
+        stats[name]["keyframe"] = candidates[0] if candidates else None
 
     return stats, id_map
+
+
+def subtract_moving_union_from_static_masks(tracking, masks_root, frame_stems,
+                                            orig_hw):
+    """Give moving masks priority over static masks in overlapping pixels.
+
+    For each frame, compute the union of all masks whose tracking entry has
+    ``motion == "moving"`` and subtract that union from every static mask.
+    Moving masks are left unchanged. Static-static and moving-moving overlaps
+    are intentionally left unchanged.
+    """
+    static_names = [
+        name for name, info in tracking.items()
+        if info.get("motion", "static") == "static"
+    ]
+    moving_names = [
+        name for name, info in tracking.items()
+        if info.get("motion", "static") == "moving"
+    ]
+    if not static_names or not moving_names:
+        return 0
+
+    H, W = orig_hw
+    removed_pixels = 0
+    for stem in frame_stems:
+        moving_union = np.zeros((H, W), dtype=np.uint8)
+        for name in moving_names:
+            mask_path = masks_root / name / f"{stem}.png"
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                raise RuntimeError(f"failed to read mask: {mask_path}")
+            moving_union = cv2.bitwise_or(moving_union, mask)
+
+        if not moving_union.any():
+            continue
+
+        inverse_moving_union = cv2.bitwise_not(moving_union)
+        for name in static_names:
+            mask_path = masks_root / name / f"{stem}.png"
+            static_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if static_mask is None:
+                raise RuntimeError(f"failed to read mask: {mask_path}")
+            overlap = cv2.bitwise_and(static_mask, moving_union)
+            removed_pixels += int(np.count_nonzero(overlap))
+            if overlap.any():
+                static_mask = cv2.bitwise_and(static_mask, inverse_moving_union)
+                if not cv2.imwrite(str(mask_path), static_mask):
+                    raise RuntimeError(f"failed to write mask: {mask_path}")
+
+    # Subtraction can make a previously visible static mask empty, so refresh
+    # its frame-range statistics before tracking.json is written.
+    for name in static_names:
+        visible_frames = []
+        for frame_idx, stem in enumerate(frame_stems):
+            mask_path = masks_root / name / f"{stem}.png"
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                raise RuntimeError(f"failed to read mask: {mask_path}")
+            if mask.any():
+                visible_frames.append(frame_idx)
+        tracking[name]["n_frames_visible"] = len(visible_frames)
+        tracking[name]["first_frame"] = (
+            visible_frames[0] if visible_frames else None
+        )
+        tracking[name]["last_frame"] = (
+            visible_frames[-1] if visible_frames else None
+        )
+
+    return removed_pixels
 
 
 def main():
@@ -480,6 +572,12 @@ def main():
             predictor.shutdown()
         except Exception as e:
             print(f"warning: predictor.shutdown() raised: {e}")
+
+    removed_pixels = subtract_moving_union_from_static_masks(
+        tracking, masks_root, frame_stems, (orig_H, orig_W)
+    )
+    print(f"\nresolved static/moving overlaps: removed {removed_pixels} "
+          "foreground pixel(s) from static masks")
 
     # Write tracking.json
     tracking_path = masks_root / "tracking.json"
