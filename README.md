@@ -1,4 +1,16 @@
-# ArtAnything
+# Track, Articulate, Act
+
+### Generating Articulation from Casual Human Videos
+
+[![Track, Articulate, Act teaser: a human interaction, reconstructed articulation, and replay in simulation](assets/teaser.gif)](https://track-articulate-act.github.io/)
+
+**Jiaming Zhang and Homanga Bharadhwaj**<br>
+Department of Computer Science, Johns Hopkins University<br>
+Brains, Bots, and Behavior Lab
+
+[**Project website**](https://track-articulate-act.github.io/) · [**Paper**](https://track-articulate-act.github.io/paper.pdf)
+
+## About
 
 A research pipeline for reconstructing articulated objects and their motion
 from RGB video frames. It combines depth and camera estimation, part
